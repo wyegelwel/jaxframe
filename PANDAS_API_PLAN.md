@@ -45,6 +45,23 @@ Comprehensive plan to mirror the pandas API with JAX support indicators.
 | `df.dtypes` | 📋 | 🚫 | 🚫 | 🚫 | Metadata |
 | `df.values` | 📋 | 🔥 | 🎯 | 📊 | Returns numeric JAX array |
 | `df.empty` | 📋 | 🔥 | 🚫 | 📊 | Boolean check |
+| `df.device` | 📋 | 🚫 | 🚫 | 🚫 | Current device (GPU/CPU/TPU) |
+
+---
+
+## 2.1 Device Management (JAXFrame Extension)
+
+These are JAXFrame-specific methods not in pandas:
+
+| Method | Status | JIT | grad | vmap | Notes |
+|--------|--------|-----|------|------|-------|
+| `df.to_device(device)` | 📋 | 🚫 | 🚫 | 🚫 | Transfer to specific device |
+| `df.to_gpu(id=0)` | 📋 | 🚫 | 🚫 | 🚫 | Transfer to GPU |
+| `df.to_cpu()` | 📋 | 🚫 | 🚫 | 🚫 | Transfer to CPU |
+| `df.to_tpu(id=0)` | 📋 | 🚫 | 🚫 | 🚫 | Transfer to TPU |
+| `df.to_devices(devices)` | 📋 | 🚫 | 🚫 | 🚫 | Shard across multiple devices |
+
+**Note:** Device transfer methods return a new DataFrame with data on the target device. They are not JIT-compilable (device placement happens outside JIT context).
 
 ---
 

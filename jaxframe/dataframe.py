@@ -151,6 +151,107 @@ class DataFrame:
         """Return row index."""
         return self._index
 
+    @property
+    def device(self):
+        """Return the device where numeric data is stored."""
+        if self._numeric_data is None:
+            return None
+        return self._numeric_data.device
+
+    # ========================================
+    # Device management methods
+    # ========================================
+
+    def to_device(self, device):
+        """
+        Transfer DataFrame to a specific device.
+
+        Args:
+            device: Target device (JAX device object or string like 'gpu', 'cpu', 'tpu')
+
+        Returns:
+            New DataFrame with data on target device
+
+        Examples:
+            >>> df_gpu = df.to_device('gpu')
+            >>> df_gpu = df.to_device(jax.devices('gpu')[0])
+        """
+        if self._numeric_data is None:
+            return self
+
+        # Handle string device specifications
+        if isinstance(device, str):
+            device = jax.devices(device)[0]
+
+        # Transfer numeric data to device
+        new_numeric_data = jax.device_put(self._numeric_data, device)
+
+        return DataFrame._from_parts(
+            numeric_data=new_numeric_data,
+            numeric_cols=self._numeric_cols,
+            numeric_dtypes=self._numeric_dtypes,
+            object_data=self._object_data,
+            index=self._index,
+            column_order=self._column_order,
+        )
+
+    def to_gpu(self, id: int = 0):
+        """
+        Transfer DataFrame to GPU.
+
+        Args:
+            id: GPU device ID (default 0)
+
+        Returns:
+            New DataFrame with data on GPU
+
+        Examples:
+            >>> df_gpu = df.to_gpu()      # Default GPU
+            >>> df_gpu = df.to_gpu(1)     # GPU 1
+        """
+        try:
+            gpu_devices = jax.devices('gpu')
+            if id >= len(gpu_devices):
+                raise ValueError(f"GPU {id} not found. Available GPUs: {len(gpu_devices)}")
+            return self.to_device(gpu_devices[id])
+        except RuntimeError:
+            raise RuntimeError("No GPU devices available")
+
+    def to_cpu(self):
+        """
+        Transfer DataFrame to CPU.
+
+        Returns:
+            New DataFrame with data on CPU
+
+        Examples:
+            >>> df_cpu = df.to_cpu()
+        """
+        cpu_device = jax.devices('cpu')[0]
+        return self.to_device(cpu_device)
+
+    def to_tpu(self, id: int = 0):
+        """
+        Transfer DataFrame to TPU.
+
+        Args:
+            id: TPU device ID (default 0)
+
+        Returns:
+            New DataFrame with data on TPU
+
+        Examples:
+            >>> df_tpu = df.to_tpu()      # Default TPU
+            >>> df_tpu = df.to_tpu(1)     # TPU 1
+        """
+        try:
+            tpu_devices = jax.devices('tpu')
+            if id >= len(tpu_devices):
+                raise ValueError(f"TPU {id} not found. Available TPUs: {len(tpu_devices)}")
+            return self.to_device(tpu_devices[id])
+        except RuntimeError:
+            raise RuntimeError("No TPU devices available")
+
     def __getitem__(self, key: Union[str, List[str]]):
         """
         Get column(s) by name.

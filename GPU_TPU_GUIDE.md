@@ -38,6 +38,64 @@ result = df.sum()
 | **String operations** | ✅ | ❌ | ❌ | CPU only |
 | **I/O operations** | ✅ | ❌ | ❌ | CPU only |
 
+### Setting the Default Device
+
+JAX allows you to control which device is used by default:
+
+```python
+import jax
+import jax.numpy as jnp
+import jaxframe as jf
+
+# Method 1: Set default device globally
+jax.config.update('jax_default_device', jax.devices('gpu')[0])
+
+# Now all DataFrames go to GPU by default
+df = jf.DataFrame({'x': [1, 2, 3]})  # Automatically on GPU
+
+# Method 2: Set via environment variable (before importing JAX)
+# export JAX_PLATFORMS=gpu  # In bash
+# or
+import os
+os.environ['JAX_PLATFORMS'] = 'gpu'
+import jax  # Must import after setting env var
+```
+
+### Device Transfer Helper Methods
+
+JAXFrame provides convenient methods to transfer DataFrames between devices:
+
+```python
+import jax
+import jaxframe as jf
+
+# Create DataFrame (on default device, usually CPU)
+df = jf.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
+
+# Check current device
+print(df.device)  # CpuDevice(id=0)
+
+# Transfer to GPU
+df_gpu = df.to_device('gpu')
+print(df_gpu.device)  # GpuDevice(id=0)
+
+# Or use convenience methods
+df_gpu = df.to_gpu()      # Transfer to default GPU
+df_gpu = df.to_gpu(0)     # Transfer to GPU 0
+df_tpu = df.to_tpu()      # Transfer to default TPU
+df_cpu = df_gpu.to_cpu()  # Transfer back to CPU
+
+# Transfer to specific device
+device = jax.devices('gpu')[1]  # GPU 1
+df_gpu1 = df.to_device(device)
+
+# Multi-GPU: Distribute across devices
+df_sharded = df.to_devices([
+    jax.devices('gpu')[0],
+    jax.devices('gpu')[1]
+])  # Each chunk on different GPU
+```
+
 ### Automatic Device Placement
 
 ```python
@@ -45,17 +103,20 @@ import jax
 import jax.numpy as jnp
 import jaxframe as jf
 
-# Create data on specific device
+# Let JAX choose automatically (uses default device)
+df = jf.DataFrame({'x': [1, 2, 3]})  # Goes to default device
+
+# Operations automatically run on the DataFrame's device
+result = df.sum()  # Runs on same device as df
+
+# Explicit device placement at construction time (old way)
 df_gpu = jf.DataFrame({
     'x': jax.device_put(jnp.array([1, 2, 3]), jax.devices('gpu')[0]),
     'y': jax.device_put(jnp.array([4, 5, 6]), jax.devices('gpu')[0])
 })
 
-# Operations automatically run on GPU
-result = df_gpu.sum()  # Runs on GPU!
-
-# Or let JAX choose automatically
-df = jf.DataFrame({'x': [1, 2, 3]})  # Goes to default device (GPU if available)
+# New way (much cleaner!)
+df_gpu = jf.DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]}).to_gpu()
 ```
 
 ### Performance on Different Devices

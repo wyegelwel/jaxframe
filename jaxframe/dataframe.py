@@ -238,14 +238,13 @@ class DataFrame:
         if self._numeric_data is None:
             raise ValueError("No numeric columns to multiply")
 
-        if isinstance(other, (int, float)):
-            new_numeric = self._numeric_data * other
-        elif isinstance(other, DataFrame):
+        if isinstance(other, DataFrame):
             if self._numeric_cols != other._numeric_cols:
                 raise ValueError("Column names must match")
             new_numeric = self._numeric_data * other._numeric_data
         else:
-            raise TypeError(f"Unsupported type for multiplication: {type(other)}")
+            # Handle scalars, JAX arrays, and JAX tracers
+            new_numeric = self._numeric_data * other
 
         return DataFrame._from_parts(
             numeric_data=new_numeric,
@@ -261,14 +260,13 @@ class DataFrame:
         if self._numeric_data is None:
             raise ValueError("No numeric columns to add")
 
-        if isinstance(other, (int, float)):
-            new_numeric = self._numeric_data + other
-        elif isinstance(other, DataFrame):
+        if isinstance(other, DataFrame):
             if self._numeric_cols != other._numeric_cols:
                 raise ValueError("Column names must match")
             new_numeric = self._numeric_data + other._numeric_data
         else:
-            raise TypeError(f"Unsupported type for addition: {type(other)}")
+            # Handle scalars, JAX arrays, and JAX tracers
+            new_numeric = self._numeric_data + other
 
         return DataFrame._from_parts(
             numeric_data=new_numeric,
@@ -284,14 +282,13 @@ class DataFrame:
         if self._numeric_data is None:
             raise ValueError("No numeric columns to subtract")
 
-        if isinstance(other, (int, float)):
-            new_numeric = self._numeric_data - other
-        elif isinstance(other, DataFrame):
+        if isinstance(other, DataFrame):
             if self._numeric_cols != other._numeric_cols:
                 raise ValueError("Column names must match")
             new_numeric = self._numeric_data - other._numeric_data
         else:
-            raise TypeError(f"Unsupported type for subtraction: {type(other)}")
+            # Handle scalars, JAX arrays, and JAX tracers
+            new_numeric = self._numeric_data - other
 
         return DataFrame._from_parts(
             numeric_data=new_numeric,

@@ -89,7 +89,8 @@ def example_object_columns_limitations():
 
     # Object columns are NOT part of JAX pytree
     print("\n--- Pytree Flattening ---")
-    children, aux = jax.tree_util.tree_flatten(df)
+    from jaxframe.dataframe import _dataframe_flatten
+    children, aux = _dataframe_flatten(df)
     print(f"Children (participates in JAX ops): {len(children)} arrays")
     print(f"Aux data (metadata): {aux['numeric_cols']} (numeric), {list(aux['object_data'].keys())} (object)")
 

@@ -210,7 +210,15 @@ class DataFrame:
                     if col in self._numeric_cols:
                         col_idx = self._numeric_cols.index(col)
                         val = self._numeric_data[i, col_idx]
-                        row_data.append(f"{val:>10.2f}")
+                        # Handle both scalars and arrays
+                        try:
+                            if hasattr(val, 'shape') and val.shape:
+                                # Multi-dimensional value, show shape instead
+                                row_data.append(f"{'Array'+ str(val.shape):>10}")
+                            else:
+                                row_data.append(f"{float(val):>10.2f}")
+                        except (TypeError, ValueError):
+                            row_data.append(f"{str(val):>10}")
                     else:
                         val = self._object_data[col][i]
                         row_data.append(f"{str(val):>10}")
@@ -381,12 +389,11 @@ class DataFrame:
         if self._numeric_data is None:
             raise ValueError("No numeric columns to compare")
 
-        if isinstance(other, (int, float)):
-            new_numeric = self._numeric_data > other
-        elif isinstance(other, DataFrame):
+        if isinstance(other, DataFrame):
             new_numeric = self._numeric_data > other._numeric_data
         else:
-            raise TypeError(f"Unsupported type for comparison: {type(other)}")
+            # Handle scalars, JAX arrays, and JAX tracers
+            new_numeric = self._numeric_data > other
 
         return DataFrame._from_parts(
             numeric_data=new_numeric,
@@ -436,7 +443,17 @@ class Series:
 
     def __init__(self, data, index=None, name=None):
         """Create a Series from array-like data."""
-        self._data = jnp.asarray(data) if isinstance(data, (list, np.ndarray)) else data
+        # Convert to array, keeping as numpy for non-numeric types
+        if isinstance(data, (list, np.ndarray)):
+            arr = np.asarray(data)
+            # Only convert to JAX if numeric
+            if np.issubdtype(arr.dtype, np.number):
+                self._data = jnp.asarray(arr)
+            else:
+                self._data = arr
+        else:
+            self._data = data
+
         if index is None:
             self._index = np.arange(len(data))
         else:

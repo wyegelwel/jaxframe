@@ -19,7 +19,7 @@ import numpy as np
 
 def concat(dataframes: List['DataFrame'], axis: int = 0):
     """
-    Concatenate DataFrames along an axis (JIT-compatible).
+    Concatenate DataFrames along an axis (JIT-compatible with dtype preservation).
 
     Args:
         dataframes: List of DataFrames to concatenate
@@ -39,16 +39,17 @@ def concat(dataframes: List['DataFrame'], axis: int = 0):
     if axis == 0:
         # Vertical concatenation (stack rows)
         # All DataFrames must have same columns
-        first_cols = dataframes[0]._numeric_cols
-        if not all(df._numeric_cols == first_cols for df in dataframes):
+        first_cols = dataframes[0]._column_order
+        if not all(df._column_order == first_cols for df in dataframes):
             raise ValueError("All DataFrames must have the same columns for axis=0")
 
-        # Concatenate numeric data
-        if dataframes[0]._numeric_data is not None:
-            numeric_arrays = [df._numeric_data for df in dataframes]
-            new_numeric_data = jnp.concatenate(numeric_arrays, axis=0)
-        else:
-            new_numeric_data = None
+        # Concatenate dtype blocks - concat blocks of same dtype
+        new_dtype_blocks = {}
+        first_column_to_block = dataframes[0]._column_to_block
+
+        for dtype in dataframes[0]._dtype_blocks.keys():
+            blocks_to_concat = [df._dtype_blocks[dtype] for df in dataframes]
+            new_dtype_blocks[dtype] = jnp.concatenate(blocks_to_concat, axis=0)
 
         # Concatenate object data
         new_object_data = {}
@@ -61,9 +62,8 @@ def concat(dataframes: List['DataFrame'], axis: int = 0):
         new_index = np.concatenate(indices, axis=0)
 
         return dataframes[0].__class__._from_parts(
-            numeric_data=new_numeric_data,
-            numeric_cols=first_cols,
-            numeric_dtypes=dataframes[0]._numeric_dtypes,
+            dtype_blocks=new_dtype_blocks,
+            column_to_block=first_column_to_block.copy(),
             object_data=new_object_data,
             index=new_index,
             column_order=dataframes[0]._column_order,
@@ -75,44 +75,34 @@ def concat(dataframes: List['DataFrame'], axis: int = 0):
         if not all(len(df) == first_len for df in dataframes):
             raise ValueError("All DataFrames must have the same number of rows for axis=1")
 
-        # Collect all numeric and object columns
-        all_numeric_cols = []
-        all_numeric_dtypes = []
-        all_numeric_data = []
-
+        # Collect all columns preserving dtypes
+        all_col_data = {}
         for df in dataframes:
-            if df._numeric_data is not None:
-                all_numeric_cols.extend(df._numeric_cols)
-                all_numeric_dtypes.extend(df._numeric_dtypes)
-                all_numeric_data.append(df._numeric_data)
+            for col in df._column_order:
+                if col in df._column_to_block:
+                    dtype, idx = df._column_to_block[col]
+                    all_col_data[col] = (df._dtype_blocks[dtype][:, idx], dtype)
+                elif col in df._object_data:
+                    all_col_data[col] = (df._object_data[col], 'object')
 
-        if all_numeric_data:
-            new_numeric_data = jnp.concatenate(all_numeric_data, axis=1)
-            new_numeric_cols = tuple(all_numeric_cols)
-            new_numeric_dtypes = tuple(all_numeric_dtypes)
-        else:
-            new_numeric_data = None
-            new_numeric_cols = ()
-            new_numeric_dtypes = ()
-
-        # Collect object data
-        new_object_data = {}
-        for df in dataframes:
-            new_object_data.update(df._object_data)
+        # Build new DataFrame from collected columns
+        numeric_data = {}
+        object_data = {}
+        for col, (data, dtype) in all_col_data.items():
+            if dtype == 'object':
+                object_data[col] = data
+            else:
+                numeric_data[col] = data
 
         # Column order
         new_column_order = tuple(
             col for df in dataframes for col in df._column_order
         )
 
-        return dataframes[0].__class__._from_parts(
-            numeric_data=new_numeric_data,
-            numeric_cols=new_numeric_cols,
-            numeric_dtypes=new_numeric_dtypes,
-            object_data=new_object_data,
-            index=dataframes[0]._index,
-            column_order=new_column_order,
-        )
+        # Create via dict init to properly group by dtype
+        result_dict = {**numeric_data, **object_data}
+        return DataFrame(result_dict, index=dataframes[0]._index)
+
     else:
         raise ValueError(f"axis must be 0 or 1, got {axis}")
 
@@ -122,18 +112,19 @@ class DataFrame:
     """
     A DataFrame implementation with JAX backend.
 
+    Uses dtype blocks architecture: one JAX array per unique dtype for memory efficiency
+    and dtype preservation.
+
     Attributes:
-        _numeric_data: JAX array of shape (n_rows, n_numeric_cols) containing all numeric columns
-        _numeric_cols: Tuple of column names for numeric data
-        _numeric_dtypes: Original dtypes for each numeric column
+        _dtype_blocks: Dict mapping dtype to JAX array of shape (n_rows, n_cols_of_that_dtype)
+        _column_to_block: Dict mapping column name to (dtype, column_index_in_block)
         _object_data: Dictionary mapping column names to numpy arrays for non-numeric data
         _index: Row index (currently simple integer index)
         _column_order: Original column order (for preserving user's column order)
     """
 
-    _numeric_data: Optional[jnp.ndarray]
-    _numeric_cols: Tuple[str, ...]
-    _numeric_dtypes: Tuple[Any, ...]
+    _dtype_blocks: Dict[np.dtype, jnp.ndarray]
+    _column_to_block: Dict[str, Tuple[np.dtype, int]]
     _object_data: Dict[str, np.ndarray]
     _index: np.ndarray
     _column_order: Tuple[str, ...]
@@ -158,12 +149,11 @@ class DataFrame:
             raise TypeError(f"Unsupported data type: {type(data)}")
 
     def _init_from_dict(self, data: Dict[str, Any], index=None):
-        """Initialize from dictionary of columns."""
+        """Initialize from dictionary of columns using dtype blocks."""
         if not data:
             # Empty DataFrame
-            self._numeric_data = None
-            self._numeric_cols = ()
-            self._numeric_dtypes = ()
+            self._dtype_blocks = {}
+            self._column_to_block = {}
             self._object_data = {}
             self._index = np.array([])
             self._column_order = ()
@@ -186,8 +176,8 @@ class DataFrame:
         for col_name, col_data in data.items():
             arr = np.asarray(col_data)
 
-            # Check if numeric
-            if np.issubdtype(arr.dtype, np.number):
+            # Check if numeric or boolean
+            if np.issubdtype(arr.dtype, np.number) or np.issubdtype(arr.dtype, np.bool_):
                 numeric_cols_dict[col_name] = arr
             else:
                 object_cols_dict[col_name] = arr
@@ -195,26 +185,45 @@ class DataFrame:
         # Store column order
         self._column_order = tuple(data.keys())
 
-        # Create numeric block
+        # Create dtype blocks: group columns by dtype
         if numeric_cols_dict:
-            self._numeric_cols = tuple(numeric_cols_dict.keys())
-            arrays = [numeric_cols_dict[col] for col in self._numeric_cols]
-            self._numeric_dtypes = tuple(arr.dtype for arr in arrays)
+            # Group columns by their dtype
+            dtype_groups = {}  # dtype -> [(col_name, array), ...]
 
-            # Stack into single JAX array
-            # Convert all to float64 for now (could be optimized later)
-            arrays_float = [arr.astype(np.float64) for arr in arrays]
-            self._numeric_data = jnp.stack(arrays_float, axis=1)
+            for col_name, arr in numeric_cols_dict.items():
+                dtype = np.dtype(arr.dtype)
+                if dtype not in dtype_groups:
+                    dtype_groups[dtype] = []
+                dtype_groups[dtype].append((col_name, arr))
+
+            # Create one block per dtype
+            self._dtype_blocks = {}
+            self._column_to_block = {}
+
+            for dtype, col_array_pairs in dtype_groups.items():
+                # Extract arrays for this dtype
+                arrays = [arr for col_name, arr in col_array_pairs]
+
+                # Stack into a 2D JAX array (n_rows, n_cols_of_this_dtype)
+                if len(arrays) == 1:
+                    block = jnp.asarray(arrays[0]).reshape(n_rows, 1)
+                else:
+                    block = jnp.stack(arrays, axis=1)
+
+                self._dtype_blocks[dtype] = block
+
+                # Build column -> (dtype, index) mapping
+                for idx, (col_name, arr) in enumerate(col_array_pairs):
+                    self._column_to_block[col_name] = (dtype, idx)
         else:
-            self._numeric_cols = ()
-            self._numeric_dtypes = ()
-            self._numeric_data = None
+            self._dtype_blocks = {}
+            self._column_to_block = {}
 
         # Store object columns
         self._object_data = object_cols_dict
 
     def _init_from_array(self, data: Union[np.ndarray, jnp.ndarray], index=None):
-        """Initialize from 2D array (all numeric)."""
+        """Initialize from 2D array (all numeric) using dtype blocks."""
         arr = jnp.asarray(data)
         if arr.ndim != 2:
             raise ValueError("Array must be 2-dimensional")
@@ -222,11 +231,18 @@ class DataFrame:
         n_rows, n_cols = arr.shape
 
         # Generate column names
-        self._numeric_cols = tuple(f"col_{i}" for i in range(n_cols))
-        self._column_order = self._numeric_cols
-        self._numeric_dtypes = tuple(arr.dtype for _ in range(n_cols))
-        self._numeric_data = arr
+        column_names = tuple(f"col_{i}" for i in range(n_cols))
+        self._column_order = column_names
         self._object_data = {}
+
+        # All columns have the same dtype, so create a single block
+        dtype = np.dtype(arr.dtype)
+        self._dtype_blocks = {dtype: arr}
+
+        # Build column -> (dtype, index) mapping
+        self._column_to_block = {
+            col_name: (dtype, idx) for idx, col_name in enumerate(column_names)
+        }
 
         # Set index
         if index is None:
@@ -258,9 +274,11 @@ class DataFrame:
     @property
     def device(self):
         """Return the device where numeric data is stored."""
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             return None
-        return self._numeric_data.device
+        # Return device of first block (all blocks should be on same device)
+        first_block = next(iter(self._dtype_blocks.values()))
+        return first_block.device
 
     @property
     def size(self) -> int:
@@ -277,8 +295,8 @@ class DataFrame:
     def dtypes(self) -> Dict[str, Any]:
         """Return dictionary mapping column names to dtypes."""
         dtypes_dict = {}
-        # Add numeric columns
-        for col, dtype in zip(self._numeric_cols, self._numeric_dtypes):
+        # Add numeric/boolean columns from dtype blocks
+        for col, (dtype, idx) in self._column_to_block.items():
             dtypes_dict[col] = dtype
         # Add object columns
         for col, arr in self._object_data.items():
@@ -288,23 +306,60 @@ class DataFrame:
     @property
     def values(self) -> jnp.ndarray:
         """
-        Return numeric data as JAX array.
+        Return numeric data as JAX array with type promotion.
 
         Returns:
             JAX array of shape (n_rows, n_numeric_cols) containing only numeric columns.
+            All dtype blocks are promoted to a common dtype and concatenated.
             Non-numeric columns are excluded.
 
         Note:
             This is JIT-compatible and differentiable (unlike pandas which returns mixed types).
+            Type promotion follows NumPy rules (e.g., int32 + float32 → float32).
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("DataFrame has no numeric columns")
-        return self._numeric_data
+
+        # Get the promoted dtype for all blocks
+        all_dtypes = list(self._dtype_blocks.keys())
+        promoted_dtype = all_dtypes[0]
+        for dtype in all_dtypes[1:]:
+            promoted_dtype = jnp.result_type(promoted_dtype, dtype)
+
+        # Convert all blocks to promoted dtype and concatenate in column order
+        numeric_cols = [col for col in self._column_order if col in self._column_to_block]
+        columns = []
+
+        for col in numeric_cols:
+            dtype, idx = self._column_to_block[col]
+            block = self._dtype_blocks[dtype]
+            col_data = block[:, idx:idx+1]  # Keep 2D shape
+            columns.append(col_data.astype(promoted_dtype))
+
+        return jnp.concatenate(columns, axis=1)
 
     @property
     def empty(self) -> bool:
         """Return True if DataFrame has no elements."""
         return self.size == 0
+
+    # Backward compatibility properties for tests
+    @property
+    def _numeric_cols(self) -> Tuple[str, ...]:
+        """Get list of numeric column names (backward compatibility)."""
+        return tuple(col for col in self._column_order if col in self._column_to_block)
+
+    @property
+    def _numeric_data(self) -> Optional[jnp.ndarray]:
+        """Get numeric data as single array (backward compatibility)."""
+        if not self._dtype_blocks:
+            return None
+        return self.values
+
+    @property
+    def _numeric_dtypes(self) -> Tuple[Any, ...]:
+        """Get numeric column dtypes (backward compatibility)."""
+        return tuple(self._column_to_block[col][0] for col in self._numeric_cols)
 
     # ========================================
     # Device management methods
@@ -324,20 +379,22 @@ class DataFrame:
             >>> df_gpu = df.to_device('gpu')
             >>> df_gpu = df.to_device(jax.devices('gpu')[0])
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             return self
 
         # Handle string device specifications
         if isinstance(device, str):
             device = jax.devices(device)[0]
 
-        # Transfer numeric data to device
-        new_numeric_data = jax.device_put(self._numeric_data, device)
+        # Transfer all dtype blocks to device
+        new_dtype_blocks = {
+            dtype: jax.device_put(block, device)
+            for dtype, block in self._dtype_blocks.items()
+        }
 
         return DataFrame._from_parts(
-            numeric_data=new_numeric_data,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
+            dtype_blocks=new_dtype_blocks,
+            column_to_block=self._column_to_block,
             object_data=self._object_data,
             index=self._index,
             column_order=self._column_order,
@@ -483,179 +540,47 @@ class DataFrame:
     # ========================================
 
     def __mul__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
-        """Element-wise multiplication (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to multiply")
-
-        if isinstance(other, DataFrame):
-            if self._numeric_cols != other._numeric_cols:
-                raise ValueError("Column names must match")
-            new_numeric = self._numeric_data * other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data * other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        """Element-wise multiplication (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.multiply, "multiplication")
 
     def __add__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
-        """Element-wise addition (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to add")
-
-        if isinstance(other, DataFrame):
-            if self._numeric_cols != other._numeric_cols:
-                raise ValueError("Column names must match")
-            new_numeric = self._numeric_data + other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data + other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        """Element-wise addition (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.add, "addition")
 
     def __sub__(self, other: Union[float, 'DataFrame', 'Series']) -> 'DataFrame':
-        """Element-wise subtraction (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to subtract")
-
-        if isinstance(other, DataFrame):
-            if self._numeric_cols != other._numeric_cols:
-                raise ValueError("Column names must match")
-            new_numeric = self._numeric_data - other._numeric_data
-        elif isinstance(other, Series):
-            # Series broadcasts across rows (like pandas)
-            new_numeric = self._numeric_data - other._data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data - other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        """Element-wise subtraction (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.subtract, "subtraction")
 
     def __truediv__(self, other: Union[float, 'DataFrame', 'Series']) -> 'DataFrame':
-        """Element-wise division (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to divide")
-
-        if isinstance(other, DataFrame):
-            if self._numeric_cols != other._numeric_cols:
-                raise ValueError("Column names must match")
-            new_numeric = self._numeric_data / other._numeric_data
-        elif isinstance(other, Series):
-            # Series broadcasts across rows (like pandas)
-            new_numeric = self._numeric_data / other._data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data / other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        """Element-wise division (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.true_divide, "division")
 
     def __floordiv__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
-        """Element-wise floor division (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to divide")
-
-        if isinstance(other, DataFrame):
-            if self._numeric_cols != other._numeric_cols:
-                raise ValueError("Column names must match")
-            new_numeric = self._numeric_data // other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data // other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        """Element-wise floor division (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.floor_divide, "floor division")
 
     def __mod__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
-        """Element-wise modulo (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns for modulo")
-
-        if isinstance(other, DataFrame):
-            if self._numeric_cols != other._numeric_cols:
-                raise ValueError("Column names must match")
-            new_numeric = self._numeric_data % other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data % other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        """Element-wise modulo (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.mod, "modulo")
 
     def __pow__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
-        """Element-wise power (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns for power")
-
-        if isinstance(other, DataFrame):
-            if self._numeric_cols != other._numeric_cols:
-                raise ValueError("Column names must match")
-            new_numeric = self._numeric_data ** other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data ** other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        """Element-wise power (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.power, "power")
 
     def __matmul__(self, other: Union[jnp.ndarray, 'DataFrame']) -> Union[jnp.ndarray, 'DataFrame']:
-        """Matrix multiplication (JIT-compatible)."""
-        if self._numeric_data is None:
+        """Matrix multiplication (JIT-compatible with type promotion)."""
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns for matrix multiplication")
 
         if isinstance(other, DataFrame):
-            if other._numeric_data is None:
+            if not other._dtype_blocks:
                 raise ValueError("Other DataFrame has no numeric columns")
-            result = self._numeric_data @ other._numeric_data
+            result = self.values @ other.values
             # Result is array, not DataFrame (consistent with pandas behavior)
             return result
         else:
             # Handle JAX arrays
-            return self._numeric_data @ other
+            return self.values @ other
 
     def sum(self, axis: Optional[int] = 0):
         """
@@ -792,19 +717,17 @@ class DataFrame:
 
         Note: Gradient is non-smooth at zero.
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns for absolute value")
 
-        new_numeric = jnp.abs(self._numeric_data)
+        # Apply abs to each column, preserving dtype
+        result_data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                col_data = self._get_column_data(col)
+                result_data[col] = jnp.abs(col_data)
 
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        return DataFrame(result_data, index=self._index.copy())
 
     def corr(self):
         """
@@ -918,7 +841,7 @@ class DataFrame:
             >>> df.shift(1)  # Shift forward by 1 (introduce lag)
             >>> df.shift(-1)  # Shift backward by 1 (lead)
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to shift")
 
         if periods == 0:
@@ -926,32 +849,34 @@ class DataFrame:
 
         n_rows = len(self._index)
 
-        if periods > 0:
-            # Shift forward (lag) - add zeros at the beginning
-            if periods >= n_rows:
-                # If shifting by more than length, return all fill_value
-                new_numeric = jnp.full_like(self._numeric_data, fill_value)
-            else:
-                padding = jnp.full((periods, self._numeric_data.shape[1]), fill_value)
-                new_numeric = jnp.concatenate([padding, self._numeric_data[:-periods]], axis=0)
-        else:
-            # Shift backward (lead) - add zeros at the end
-            abs_periods = abs(periods)
-            if abs_periods >= n_rows:
-                # If shifting by more than length, return all fill_value
-                new_numeric = jnp.full_like(self._numeric_data, fill_value)
-            else:
-                padding = jnp.full((abs_periods, self._numeric_data.shape[1]), fill_value)
-                new_numeric = jnp.concatenate([self._numeric_data[abs_periods:], padding], axis=0)
+        # Apply shift to each column, preserving dtype
+        result_data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                col_data = self._get_column_data(col)
 
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,  # Object data not shifted
-            index=self._index,
-            column_order=self._column_order,
-        )
+                if periods > 0:
+                    # Shift forward (lag) - add fill_value at the beginning
+                    if periods >= n_rows:
+                        # If shifting by more than length, return all fill_value
+                        new_col_data = jnp.full_like(col_data, fill_value)
+                    else:
+                        padding = jnp.full((periods,), fill_value, dtype=col_data.dtype)
+                        new_col_data = jnp.concatenate([padding, col_data[:-periods]], axis=0)
+                else:
+                    # Shift backward (lead) - add fill_value at the end
+                    abs_periods = abs(periods)
+                    if abs_periods >= n_rows:
+                        # If shifting by more than length, return all fill_value
+                        new_col_data = jnp.full_like(col_data, fill_value)
+                    else:
+                        padding = jnp.full((abs_periods,), fill_value, dtype=col_data.dtype)
+                        new_col_data = jnp.concatenate([col_data[abs_periods:], padding], axis=0)
+
+                result_data[col] = new_col_data
+
+        # Note: object data is not shifted, similar to old behavior
+        return DataFrame(result_data, index=self._index.copy())
 
     def diff(self, periods: int = 1):
         """
@@ -967,33 +892,33 @@ class DataFrame:
             >>> df.diff()  # df[i] - df[i-1]
             >>> df.diff(2)  # df[i] - df[i-2]
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns for diff")
 
         shifted = self.shift(periods, fill_value=0.0)
-        diff_numeric = self._numeric_data - shifted._numeric_data
 
-        # Set first 'periods' rows to 0 (matching pandas behavior with fillna(0))
-        # This is because pandas returns NaN for the first 'periods' rows
-        if periods > 0:
-            mask = jnp.arange(len(self._index)) < periods
-            mask = mask[:, None]  # Broadcast across columns
-            diff_numeric = jnp.where(mask, 0.0, diff_numeric)
-        elif periods < 0:
-            # For negative periods, mask the last abs(periods) rows
-            abs_periods = abs(periods)
-            mask = jnp.arange(len(self._index)) >= (len(self._index) - abs_periods)
-            mask = mask[:, None]  # Broadcast across columns
-            diff_numeric = jnp.where(mask, 0.0, diff_numeric)
+        # Calculate differences for each column
+        result_data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                col_data = self._get_column_data(col)
+                shifted_data = shifted._get_column_data(col)
+                diff_col = col_data - shifted_data
 
-        return DataFrame._from_parts(
-            numeric_data=diff_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+                # Set first 'periods' rows to 0 (matching pandas behavior with fillna(0))
+                # This is because pandas returns NaN for the first 'periods' rows
+                if periods > 0:
+                    mask = jnp.arange(len(self._index)) < periods
+                    diff_col = jnp.where(mask, 0.0, diff_col)
+                elif periods < 0:
+                    # For negative periods, mask the last abs(periods) rows
+                    abs_periods = abs(periods)
+                    mask = jnp.arange(len(self._index)) >= (len(self._index) - abs_periods)
+                    diff_col = jnp.where(mask, 0.0, diff_col)
+
+                result_data[col] = diff_col
+
+        return DataFrame(result_data, index=self._index.copy())
 
     def pct_change(self, periods: int = 1):
         """
@@ -1010,24 +935,24 @@ class DataFrame:
         Examples:
             >>> df.pct_change()  # (df[i] - df[i-1]) / df[i-1]
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns for pct_change")
 
         shifted = self.shift(periods, fill_value=1.0)  # Use 1.0 to avoid division by zero in padding
-        pct_change_numeric = (self._numeric_data - shifted._numeric_data) / shifted._numeric_data
 
-        return DataFrame._from_parts(
-            numeric_data=pct_change_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+        # Calculate percentage change for each column
+        result_data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                col_data = self._get_column_data(col)
+                shifted_data = shifted._get_column_data(col)
+                result_data[col] = (col_data - shifted_data) / shifted_data
+
+        return DataFrame(result_data, index=self._index.copy())
 
     def where(self, condition, fill_value):
         """
-        Replace values where condition is False (JIT-compatible).
+        Replace values where condition is False (JIT-compatible with dtype preservation).
 
         This is the JIT-friendly alternative to boolean indexing.
 
@@ -1041,28 +966,27 @@ class DataFrame:
         Examples:
             >>> df.where(df > 10, fill_value=0)  # Replace values <= 10 with 0
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns for where operation")
 
         if isinstance(condition, DataFrame):
-            mask = condition._numeric_data
+            # Apply where column by column
+            result_data = {}
+            for col in self._column_order:
+                if col in self._column_to_block and col in condition._column_to_block:
+                    col_data = self._get_column_data(col)
+                    cond_data = condition._get_column_data(col)
+                    result_data[col] = jnp.where(cond_data, col_data, fill_value)
+            return DataFrame(result_data, index=self._index.copy())
         else:
+            # Scalar or array condition - apply to all columns
             mask = jnp.asarray(condition)
-
-        # Broadcast if needed
-        if mask.ndim == 1:
-            mask = mask[:, None]
-
-        new_numeric = jnp.where(mask, self._numeric_data, fill_value)
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+            result_data = {}
+            for col in self._column_order:
+                if col in self._column_to_block:
+                    col_data = self._get_column_data(col)
+                    result_data[col] = jnp.where(mask, col_data, fill_value)
+            return DataFrame(result_data, index=self._index.copy())
 
     def mask(self, condition, fill_value):
         """
@@ -1080,29 +1004,30 @@ class DataFrame:
         Examples:
             >>> df.mask(df > 10, fill_value=0)  # Replace values > 10 with 0
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns for mask operation")
 
         if isinstance(condition, DataFrame):
-            mask_data = condition._numeric_data
+            # Apply mask column by column
+            result_data = {}
+            for col in self._column_order:
+                if col in self._column_to_block and col in condition._column_to_block:
+                    col_data = self._get_column_data(col)
+                    cond_data = condition._get_column_data(col)
+                    # Convert condition to boolean (handles 0/1 as int/float from comparisons)
+                    cond_bool = cond_data.astype(bool)
+                    # mask is inverse of where: replace where condition is True
+                    result_data[col] = jnp.where(~cond_bool, col_data, fill_value)
+            return DataFrame(result_data, index=self._index.copy())
         else:
-            mask_data = jnp.asarray(condition)
-
-        # Broadcast if needed
-        if mask_data.ndim == 1:
-            mask_data = mask_data[:, None]
-
-        # mask is inverse of where
-        new_numeric = jnp.where(~mask_data, self._numeric_data, fill_value)
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+            # Scalar or array condition - apply to all columns
+            mask = jnp.asarray(condition).astype(bool)
+            result_data = {}
+            for col in self._column_order:
+                if col in self._column_to_block:
+                    col_data = self._get_column_data(col)
+                    result_data[col] = jnp.where(~mask, col_data, fill_value)
+            return DataFrame(result_data, index=self._index.copy())
 
     def clip(self, lower=None, upper=None):
         """
@@ -1119,24 +1044,23 @@ class DataFrame:
             >>> df.clip(0, 10)  # Clip to [0, 10]
             >>> df.clip(lower=0)  # Clip minimum to 0
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to clip")
 
-        new_numeric = self._numeric_data
+        # Apply clipping to each column
+        result_data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                col_data = self._get_column_data(col)
 
-        if lower is not None:
-            new_numeric = jnp.maximum(new_numeric, lower)
-        if upper is not None:
-            new_numeric = jnp.minimum(new_numeric, upper)
+                if lower is not None:
+                    col_data = jnp.maximum(col_data, lower)
+                if upper is not None:
+                    col_data = jnp.minimum(col_data, upper)
 
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
-            object_data=self._object_data,
-            index=self._index,
-            column_order=self._column_order,
-        )
+                result_data[col] = col_data
+
+        return DataFrame(result_data, index=self._index.copy())
 
     # ========================================
     # Indexing and selection
@@ -1157,19 +1081,19 @@ class DataFrame:
         Returns:
             DataFrame with first n rows
         """
-        if self._numeric_data is not None:
-            new_numeric = self._numeric_data[:n]
-        else:
-            new_numeric = None
+        # Slice dtype blocks
+        new_dtype_blocks = {}
+        for dtype, block in self._dtype_blocks.items():
+            new_dtype_blocks[dtype] = block[:n]
 
+        # Slice object data
         new_object_data = {}
         for col, arr in self._object_data.items():
             new_object_data[col] = arr[:n]
 
         return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
+            dtype_blocks=new_dtype_blocks,
+            column_to_block=self._column_to_block.copy(),
             object_data=new_object_data,
             index=self._index[:n],
             column_order=self._column_order,
@@ -1187,37 +1111,35 @@ class DataFrame:
         """
         # Handle n=0 edge case (return empty DataFrame)
         if n == 0:
-            if self._numeric_data is not None:
-                new_numeric = self._numeric_data[:0]
-            else:
-                new_numeric = None
+            new_dtype_blocks = {}
+            for dtype, block in self._dtype_blocks.items():
+                new_dtype_blocks[dtype] = block[:0]
 
             new_object_data = {}
             for col, arr in self._object_data.items():
                 new_object_data[col] = arr[:0]
 
             return DataFrame._from_parts(
-                numeric_data=new_numeric,
-                numeric_cols=self._numeric_cols,
-                numeric_dtypes=self._numeric_dtypes,
+                dtype_blocks=new_dtype_blocks,
+                column_to_block=self._column_to_block.copy(),
                 object_data=new_object_data,
                 index=self._index[:0],
                 column_order=self._column_order,
             )
 
-        if self._numeric_data is not None:
-            new_numeric = self._numeric_data[-n:]
-        else:
-            new_numeric = None
+        # Slice dtype blocks from the end
+        new_dtype_blocks = {}
+        for dtype, block in self._dtype_blocks.items():
+            new_dtype_blocks[dtype] = block[-n:]
 
+        # Slice object data from the end
         new_object_data = {}
         for col, arr in self._object_data.items():
             new_object_data[col] = arr[-n:]
 
         return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=self._numeric_dtypes,
+            dtype_blocks=new_dtype_blocks,
+            column_to_block=self._column_to_block.copy(),
             object_data=new_object_data,
             index=self._index[-n:],
             column_order=self._column_order,
@@ -1244,204 +1166,167 @@ class DataFrame:
     # ========================================
 
     def __gt__(self, other) -> 'DataFrame':
-        """Greater than comparison (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to compare")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data > other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data > other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Greater than comparison (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.greater, "greater than")
 
     def __ge__(self, other) -> 'DataFrame':
-        """Greater than or equal comparison (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to compare")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data >= other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data >= other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Greater than or equal comparison (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.greater_equal, "greater than or equal")
 
     def __lt__(self, other) -> 'DataFrame':
-        """Less than comparison (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to compare")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data < other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data < other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Less than comparison (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.less, "less than")
 
     def __le__(self, other) -> 'DataFrame':
-        """Less than or equal comparison (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to compare")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data <= other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data <= other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Less than or equal comparison (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.less_equal, "less than or equal")
 
     def __eq__(self, other) -> 'DataFrame':
-        """Equality comparison (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to compare")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data == other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data == other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Equality comparison (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.equal, "equality")
 
     def __ne__(self, other) -> 'DataFrame':
-        """Not equal comparison (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns to compare")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data != other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data != other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Not equal comparison (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.not_equal, "not equal")
 
     # ========================================
     # Logical operations
     # ========================================
 
     def __and__(self, other) -> 'DataFrame':
-        """Logical AND (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns for logical AND")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data & other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data & other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Logical AND (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.bitwise_and, "logical AND")
 
     def __or__(self, other) -> 'DataFrame':
-        """Logical OR (JIT-compatible)."""
-        if self._numeric_data is None:
-            raise ValueError("No numeric columns for logical OR")
-
-        if isinstance(other, DataFrame):
-            new_numeric = self._numeric_data | other._numeric_data
-        else:
-            # Handle scalars, JAX arrays, and JAX tracers
-            new_numeric = self._numeric_data | other
-
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        """Logical OR (JIT-compatible with type promotion)."""
+        return self._apply_elementwise(other, jnp.bitwise_or, "logical OR")
 
     def __invert__(self) -> 'DataFrame':
         """Logical NOT (JIT-compatible)."""
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns for logical NOT")
 
-        new_numeric = ~self._numeric_data
+        # Apply inversion to each block independently
+        result_data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                col_data = self._get_column_data(col)
+                # Convert to boolean if needed (handles comparison results that might be 0/1 as ints/floats)
+                bool_data = col_data.astype(bool)
+                result_data[col] = ~bool_data
 
-        return DataFrame._from_parts(
-            numeric_data=new_numeric,
-            numeric_cols=self._numeric_cols,
-            numeric_dtypes=tuple(jnp.bool_ for _ in self._numeric_cols),
-            object_data={},
-            index=self._index,
-            column_order=self._numeric_cols,
-        )
+        return DataFrame(result_data, index=self._index.copy())
 
     # ========================================
     # Internal helpers
     # ========================================
 
+    def _get_column_data(self, col_name: str) -> jnp.ndarray:
+        """Get data for a single column as 1D array."""
+        if col_name in self._column_to_block:
+            dtype, idx = self._column_to_block[col_name]
+            return self._dtype_blocks[dtype][:, idx]
+        elif col_name in self._object_data:
+            return self._object_data[col_name]
+        else:
+            raise KeyError(f"Column '{col_name}' not found")
+
+    def _apply_elementwise(self, other, op, op_name: str = "operation"):
+        """
+        Apply element-wise operation with type promotion.
+
+        Args:
+            other: scalar, DataFrame, Series, or array
+            op: Binary operation function (e.g., jnp.add)
+            op_name: Name of operation for error messages
+
+        Returns:
+            New DataFrame with result
+        """
+        if isinstance(other, (int, float, bool, np.number)):
+            # Scalar operation: apply to each block independently
+            new_blocks = {}
+            for dtype, block in self._dtype_blocks.items():
+                # Determine result dtype
+                result_dtype = jnp.result_type(dtype, type(other))
+                new_blocks[np.dtype(result_dtype)] = op(block, other).astype(result_dtype)
+
+            # Rebuild column mapping if dtype changed
+            new_column_to_block = {}
+            for col, (old_dtype, idx) in self._column_to_block.items():
+                result_dtype = jnp.result_type(old_dtype, type(other))
+                new_column_to_block[col] = (np.dtype(result_dtype), idx)
+
+            return DataFrame._from_parts(
+                dtype_blocks=new_blocks,
+                column_to_block=new_column_to_block,
+                object_data=self._object_data.copy(),
+                index=self._index.copy(),
+                column_order=self._column_order,
+            )
+
+        elif isinstance(other, DataFrame):
+            # DataFrame operation: align and promote types
+            if self._column_order != other._column_order:
+                raise ValueError(f"Column mismatch for {op_name}")
+
+            # Collect results for each column
+            result_data = {}
+            for col in self._column_order:
+                if col in self._column_to_block and col in other._column_to_block:
+                    left_data = self._get_column_data(col)
+                    right_data = other._get_column_data(col)
+
+                    # Determine result dtype
+                    left_dtype, _ = self._column_to_block[col]
+                    right_dtype, _ = other._column_to_block[col]
+                    result_dtype = jnp.result_type(left_dtype, right_dtype)
+
+                    result_data[col] = op(left_data, right_data).astype(result_dtype)
+
+            return DataFrame(result_data, index=self._index.copy())
+
+        elif type(other).__name__ == 'Series':
+            # Series broadcasts across rows (like pandas)
+            result_data = {}
+            for col in self._column_order:
+                if col in self._column_to_block:
+                    col_data = self._get_column_data(col)
+                    dtype, _ = self._column_to_block[col]
+                    result_dtype = jnp.result_type(dtype, other._data.dtype)
+                    result_data[col] = op(col_data, other._data).astype(result_dtype)
+
+            return DataFrame(result_data, index=self._index.copy())
+
+        elif isinstance(other, (np.ndarray, jnp.ndarray)):
+            # Array operation: broadcast to each column
+            other_arr = jnp.asarray(other)
+            result_data = {}
+            for col in self._column_order:
+                if col in self._column_to_block:
+                    col_data = self._get_column_data(col)
+                    dtype, _ = self._column_to_block[col]
+                    result_dtype = jnp.result_type(dtype, other_arr.dtype)
+                    result_data[col] = op(col_data, other_arr).astype(result_dtype)
+
+            return DataFrame(result_data, index=self._index.copy())
+
+        else:
+            raise TypeError(f"Unsupported operand type for {op_name}: {type(other)}")
+
     @classmethod
     def _from_parts(
         cls,
-        numeric_data,
-        numeric_cols,
-        numeric_dtypes,
+        dtype_blocks,
+        column_to_block,
         object_data,
         index,
         column_order,
     ):
-        """Internal constructor from pre-separated parts."""
+        """Internal constructor from pre-separated parts (dtype blocks)."""
         df = cls.__new__(cls)
-        df._numeric_data = numeric_data
-        df._numeric_cols = numeric_cols
-        df._numeric_dtypes = numeric_dtypes
+        df._dtype_blocks = dtype_blocks
+        df._column_to_block = column_to_block
         df._object_data = object_data
         df._index = index
         df._column_order = column_order
@@ -1478,89 +1363,76 @@ class _ILocIndexer:
             # Two-dimensional indexing: df.iloc[rows, cols]
             row_key, col_key = key
 
-            # Index rows
-            if self._df._numeric_data is not None:
-                numeric_data = self._df._numeric_data[row_key]
-            else:
-                numeric_data = None
-
-            # Handle object data
-            object_data = {}
-            for col, arr in self._df._object_data.items():
-                object_data[col] = arr[row_key]
-
-            # Index columns
+            # Index columns first to determine selected columns
             if isinstance(col_key, int):
-                # Single column selection
+                # Single column selection -> Series
                 col_name = self._df._column_order[col_key]
-                if col_name in self._df._numeric_cols:
-                    idx = self._df._numeric_cols.index(col_name)
-                    if numeric_data.ndim == 1:
-                        data = numeric_data[idx]
-                    else:
-                        data = numeric_data[:, idx]
+                if col_name in self._df._column_to_block:
+                    data = self._df._get_column_data(col_name)[row_key]
                     return Series(data, index=self._df._index[row_key], name=col_name)
                 else:
-                    return Series(object_data[col_name], index=self._df._index[row_key], name=col_name)
+                    # Object column
+                    data = self._df._object_data[col_name][row_key]
+                    return Series(data, index=self._df._index[row_key], name=col_name)
             else:
-                # Multiple column selection
+                # Multiple column selection -> DataFrame
                 if isinstance(col_key, slice):
                     selected_cols = self._df._column_order[col_key]
                 else:
                     selected_cols = tuple(self._df._column_order[i] for i in col_key)
 
-                # Filter numeric and object data
-                numeric_cols_sel = []
-                numeric_indices = []
-                object_data_sel = {}
-
+                # Build result by selecting and indexing each column
+                result_data = {}
                 for col in selected_cols:
-                    if col in self._df._numeric_cols:
-                        idx = self._df._numeric_cols.index(col)
-                        numeric_cols_sel.append(col)
-                        numeric_indices.append(idx)
-                    elif col in object_data:
-                        object_data_sel[col] = object_data[col]
+                    if col in self._df._column_to_block:
+                        result_data[col] = self._df._get_column_data(col)[row_key]
+                    elif col in self._df._object_data:
+                        result_data[col] = self._df._object_data[col][row_key]
 
-                if numeric_indices:
-                    numeric_data_sel = numeric_data[..., numeric_indices] if numeric_data is not None else None
-                    numeric_cols_sel = tuple(numeric_cols_sel)
-                    numeric_dtypes_sel = tuple(self._df._numeric_dtypes[i] for i in numeric_indices)
+                # Handle different key types for index
+                if isinstance(row_key, slice):
+                    new_index = self._df._index[row_key]
+                elif isinstance(row_key, int):
+                    new_index = np.array([self._df._index[row_key]])
                 else:
-                    numeric_data_sel = None
-                    numeric_cols_sel = ()
-                    numeric_dtypes_sel = ()
+                    new_index = self._df._index[jnp.asarray(row_key)]
 
-                return DataFrame._from_parts(
-                    numeric_data=numeric_data_sel,
-                    numeric_cols=numeric_cols_sel,
-                    numeric_dtypes=numeric_dtypes_sel,
-                    object_data=object_data_sel,
-                    index=self._df._index[row_key],
-                    column_order=selected_cols,
-                )
+                return DataFrame(result_data, index=new_index)
         else:
             # One-dimensional indexing: df.iloc[rows]
             if isinstance(key, int):
                 # Single row -> Series
-                if self._df._numeric_data is not None:
-                    data = self._df._numeric_data[key]
+                # Collect all column data for this row
+                data_dict = {}
+                for col in self._df._column_order:
+                    if col in self._df._column_to_block:
+                        data_dict[col] = self._df._get_column_data(col)[key]
+                    elif col in self._df._object_data:
+                        data_dict[col] = self._df._object_data[col][key]
+
+                # Convert to array for Series (only numeric columns)
+                if self._df._dtype_blocks:
+                    # Build array in column order from numeric columns only
+                    numeric_data = []
+                    for col in self._df._column_order:
+                        if col in self._df._column_to_block:
+                            numeric_data.append(data_dict[col])
+                    data = jnp.array(numeric_data)
                     return Series(data, index=np.array(self._df._numeric_cols), name=self._df._index[key])
                 else:
                     # Only object columns
-                    data_dict = {col: arr[key] for col, arr in self._df._object_data.items()}
-                    # Convert to array for Series
                     raise NotImplementedError("Single row selection with only object columns not yet supported")
             else:
                 # Multiple rows -> DataFrame
-                if self._df._numeric_data is not None:
-                    numeric_data = self._df._numeric_data[key]
-                else:
-                    numeric_data = None
+                # Index all dtype blocks
+                new_dtype_blocks = {}
+                for dtype, block in self._df._dtype_blocks.items():
+                    new_dtype_blocks[dtype] = block[key]
 
-                object_data = {}
+                # Index object data
+                new_object_data = {}
                 for col, arr in self._df._object_data.items():
-                    object_data[col] = arr[key]
+                    new_object_data[col] = arr[key]
 
                 # Handle different key types for index
                 if isinstance(key, slice):
@@ -1569,10 +1441,9 @@ class _ILocIndexer:
                     new_index = self._df._index[jnp.asarray(key)]
 
                 return DataFrame._from_parts(
-                    numeric_data=numeric_data,
-                    numeric_cols=self._df._numeric_cols,
-                    numeric_dtypes=self._df._numeric_dtypes,
-                    object_data=object_data,
+                    dtype_blocks=new_dtype_blocks,
+                    column_to_block=self._df._column_to_block.copy(),
+                    object_data=new_object_data,
                     index=new_index,
                     column_order=self._df._column_order,
                 )
@@ -1644,18 +1515,21 @@ class Series:
 
 def _dataframe_flatten(df: DataFrame):
     """
-    Flatten DataFrame for JAX transformations.
+    Flatten DataFrame for JAX transformations (dtype blocks version).
 
     Only numeric data participates in JAX operations (grad, jit, vmap).
     Object data is auxiliary and passes through unchanged.
     """
-    # Children: arrays that participate in JAX operations
-    children = (df._numeric_data,) if df._numeric_data is not None else ()
+    # Children: all dtype blocks (arrays that participate in JAX operations)
+    # Sort dtypes for deterministic ordering
+    dtype_items = sorted(df._dtype_blocks.items(), key=lambda x: str(x[0]))
+    children = tuple(block for _, block in dtype_items)
+    dtypes_order = tuple(dtype for dtype, _ in dtype_items)
 
     # Aux data: metadata that doesn't participate in JAX ops
     aux_data = {
-        'numeric_cols': df._numeric_cols,
-        'numeric_dtypes': df._numeric_dtypes,
+        'dtypes_order': dtypes_order,
+        'column_to_block': df._column_to_block,
         'object_data': df._object_data,
         'index': df._index,
         'column_order': df._column_order,
@@ -1665,13 +1539,15 @@ def _dataframe_flatten(df: DataFrame):
 
 
 def _dataframe_unflatten(aux_data, children):
-    """Reconstruct DataFrame from flattened representation."""
-    numeric_data = children[0] if children else None
+    """Reconstruct DataFrame from flattened representation (dtype blocks version)."""
+    # Reconstruct dtype_blocks from children and dtypes_order
+    dtype_blocks = {}
+    for dtype, block in zip(aux_data['dtypes_order'], children):
+        dtype_blocks[dtype] = block
 
     return DataFrame._from_parts(
-        numeric_data=numeric_data,
-        numeric_cols=aux_data['numeric_cols'],
-        numeric_dtypes=aux_data['numeric_dtypes'],
+        dtype_blocks=dtype_blocks,
+        column_to_block=aux_data['column_to_block'],
         object_data=aux_data['object_data'],
         index=aux_data['index'],
         column_order=aux_data['column_order'],

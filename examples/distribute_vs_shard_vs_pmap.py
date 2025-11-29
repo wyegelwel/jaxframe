@@ -14,7 +14,6 @@ sys.path.insert(0, '..')
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PositionalSharding
 from jaxframe import DataFrame
 
 
@@ -150,7 +149,7 @@ def example_distribute_manual():
 def example_shard_automatic():
     """Example: shard() with automatic parallelism."""
     print("\n" + "=" * 70)
-    print("Example 2: shard() - Automatic Parallelism")
+    print("Example 2: shard() - Automatic Parallelism (CONCEPTUAL)")
     print("=" * 70)
 
     df = DataFrame({
@@ -160,43 +159,52 @@ def example_shard_automatic():
 
     print("\nOriginal DataFrame shape:", df.shape)
 
-    # STEP 1: Create sharding (what df.shard() would do)
-    devices = jax.devices('cpu')  # Using CPU for demo
-    sharding = PositionalSharding(devices)
+    print("""
+CONCEPTUAL: What df.shard() would do with modern JAX:
+-----------------------------------------------------
+# STEP 1: Create sharding specification
+devices = jax.devices('gpu')  # All GPUs
+sharding = PositionalSharding(devices)
 
-    # Shard along first axis (rows)
-    sharded_data = jax.device_put(
-        df._numeric_data,
-        sharding.reshape(len(devices), 1)  # Split rows, replicate columns
-    )
+# Shard along first axis (rows)
+sharded_data = jax.device_put(
+    df._numeric_data,
+    sharding.reshape(len(devices), 1)  # Split rows, replicate columns
+)
 
-    df_sharded = DataFrame._from_parts(
-        numeric_data=sharded_data,
-        numeric_cols=df._numeric_cols,
-        numeric_dtypes=df._numeric_dtypes,
-        object_data={},
-        index=df._index,
-        column_order=df._column_order,
-    )
+df_sharded = DataFrame._from_parts(
+    numeric_data=sharded_data,
+    ...
+)
 
-    print(f"\nSharded data shape: {df_sharded._numeric_data.shape}")
-    print(f"Sharding: {df_sharded._numeric_data.sharding}")
+# STEP 2: Operations are AUTOMATICALLY parallel!
+# NO pmap needed - JAX handles it!
 
-    # STEP 2: Operations are AUTOMATICALLY parallel!
-    # NO pmap needed - JAX handles it!
+@jax.jit
+def compute(df):
+    normalized = (df._numeric_data - df._numeric_data.mean()) / df._numeric_data.std()
+    return normalized.sum(axis=0)
 
+result = compute(df_sharded)  # JAX auto-parallelizes!
+
+Key Point: You write normal code, JAX figures out how to parallelize it
+based on the sharding specification!
+    """)
+
+    # Demonstrate on single device (same logic, just not multi-device)
     @jax.jit
-    def compute(df):
+    def compute(data):
         """Regular function - no pmap needed!"""
-        normalized = (df._numeric_data - df._numeric_data.mean()) / df._numeric_data.std()
+        normalized = (data - data.mean()) / data.std()
         return normalized.sum(axis=0)
 
-    result = compute(df_sharded)  # JAX auto-parallelizes!
-    print(f"\nResult: {result}")
+    result = compute(df._numeric_data)
+    print(f"\nDemo result (single device): {result}")
 
     print("\n✅ shard() handles parallelism automatically!")
     print("   Pros: Transparent, less code, automatic optimization")
     print("   Cons: Less explicit control")
+    print("   Note: Requires JAX >= 0.4.0 for PositionalSharding API")
 
 
 def example_when_to_use_pmap():
@@ -249,27 +257,30 @@ Example: Distributed Training
         - batch for this device
         - params replicated across devices
         """
-        # Compute loss on this device's batch
-        predictions = batch @ params
-        loss = ((predictions - batch) ** 2).mean()
+        # Simple computation on this device's batch
+        # Each device computes mean of its own data
+        local_mean = batch.mean()
 
-        # Compute gradients on this device
-        grads = jax.grad(lambda p: ((batch @ p - batch) ** 2).mean())(params)
+        # Simple "gradient" computation (just for demo)
+        # In real training, this would be actual gradient computation
+        grad_value = (batch * params).sum()
 
         # pmap_axis_name enables cross-device operations
-        # grads = jax.lax.pmean(grads, axis_name='devices')  # Average across devices
+        # grad_value = jax.lax.pmean(grad_value, axis_name='devices')  # Average across devices
 
-        return grads, loss
+        return grad_value, local_mean
 
     # Initialize params (replicated across devices)
     params = jnp.ones((2,))
+    # Replicate params for each device (add device dimension)
+    params_replicated = jnp.stack([params] * n_devices)
 
     # Run training step in parallel
-    grads, losses = train_step(per_device_data, params)
+    grad_values, means = train_step(per_device_data, params_replicated)
 
-    print(f"\nGradients shape: {grads.shape}")  # (n_devices, param_size)
-    print(f"Losses shape: {losses.shape}")      # (n_devices,)
-    print(f"Per-device losses: {losses}")
+    print(f"\nGrad values shape: {grad_values.shape}")  # (n_devices,)
+    print(f"Means shape: {means.shape}")      # (n_devices,)
+    print(f"Per-device means: {means}")
 
     print("\n✅ pmap needed for custom training logic!")
     print("   You control exactly what runs in parallel")

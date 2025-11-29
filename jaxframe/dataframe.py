@@ -141,6 +141,10 @@ class DataFrame:
         n_cols = len(self._column_order)
         return (n_rows, n_cols)
 
+    def __len__(self) -> int:
+        """Return number of rows."""
+        return len(self._index)
+
     @property
     def columns(self) -> List[str]:
         """Return list of column names."""

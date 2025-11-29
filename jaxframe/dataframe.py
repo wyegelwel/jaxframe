@@ -957,6 +957,19 @@ class DataFrame:
         shifted = self.shift(periods, fill_value=0.0)
         diff_numeric = self._numeric_data - shifted._numeric_data
 
+        # Set first 'periods' rows to 0 (matching pandas behavior with fillna(0))
+        # This is because pandas returns NaN for the first 'periods' rows
+        if periods > 0:
+            mask = jnp.arange(len(self._index)) < periods
+            mask = mask[:, None]  # Broadcast across columns
+            diff_numeric = jnp.where(mask, 0.0, diff_numeric)
+        elif periods < 0:
+            # For negative periods, mask the last abs(periods) rows
+            abs_periods = abs(periods)
+            mask = jnp.arange(len(self._index)) >= (len(self._index) - abs_periods)
+            mask = mask[:, None]  # Broadcast across columns
+            diff_numeric = jnp.where(mask, 0.0, diff_numeric)
+
         return DataFrame._from_parts(
             numeric_data=diff_numeric,
             numeric_cols=self._numeric_cols,

@@ -526,7 +526,7 @@ class DataFrame:
             column_order=self._column_order,
         )
 
-    def __sub__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
+    def __sub__(self, other: Union[float, 'DataFrame', 'Series']) -> 'DataFrame':
         """Element-wise subtraction (JIT-compatible)."""
         if self._numeric_data is None:
             raise ValueError("No numeric columns to subtract")
@@ -535,6 +535,9 @@ class DataFrame:
             if self._numeric_cols != other._numeric_cols:
                 raise ValueError("Column names must match")
             new_numeric = self._numeric_data - other._numeric_data
+        elif isinstance(other, Series):
+            # Series broadcasts across rows (like pandas)
+            new_numeric = self._numeric_data - other._data
         else:
             # Handle scalars, JAX arrays, and JAX tracers
             new_numeric = self._numeric_data - other
@@ -548,7 +551,7 @@ class DataFrame:
             column_order=self._column_order,
         )
 
-    def __truediv__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
+    def __truediv__(self, other: Union[float, 'DataFrame', 'Series']) -> 'DataFrame':
         """Element-wise division (JIT-compatible)."""
         if self._numeric_data is None:
             raise ValueError("No numeric columns to divide")
@@ -557,6 +560,9 @@ class DataFrame:
             if self._numeric_cols != other._numeric_cols:
                 raise ValueError("Column names must match")
             new_numeric = self._numeric_data / other._numeric_data
+        elif isinstance(other, Series):
+            # Series broadcasts across rows (like pandas)
+            new_numeric = self._numeric_data / other._data
         else:
             # Handle scalars, JAX arrays, and JAX tracers
             new_numeric = self._numeric_data / other
@@ -918,15 +924,25 @@ class DataFrame:
         if periods == 0:
             return self
 
+        n_rows = len(self._index)
+
         if periods > 0:
             # Shift forward (lag) - add zeros at the beginning
-            padding = jnp.full((periods, self._numeric_data.shape[1]), fill_value)
-            new_numeric = jnp.concatenate([padding, self._numeric_data[:-periods]], axis=0)
+            if periods >= n_rows:
+                # If shifting by more than length, return all fill_value
+                new_numeric = jnp.full_like(self._numeric_data, fill_value)
+            else:
+                padding = jnp.full((periods, self._numeric_data.shape[1]), fill_value)
+                new_numeric = jnp.concatenate([padding, self._numeric_data[:-periods]], axis=0)
         else:
             # Shift backward (lead) - add zeros at the end
-            periods = abs(periods)
-            padding = jnp.full((periods, self._numeric_data.shape[1]), fill_value)
-            new_numeric = jnp.concatenate([self._numeric_data[periods:], padding], axis=0)
+            abs_periods = abs(periods)
+            if abs_periods >= n_rows:
+                # If shifting by more than length, return all fill_value
+                new_numeric = jnp.full_like(self._numeric_data, fill_value)
+            else:
+                padding = jnp.full((abs_periods, self._numeric_data.shape[1]), fill_value)
+                new_numeric = jnp.concatenate([self._numeric_data[abs_periods:], padding], axis=0)
 
         return DataFrame._from_parts(
             numeric_data=new_numeric,
@@ -1169,6 +1185,26 @@ class DataFrame:
         Returns:
             DataFrame with last n rows
         """
+        # Handle n=0 edge case (return empty DataFrame)
+        if n == 0:
+            if self._numeric_data is not None:
+                new_numeric = self._numeric_data[:0]
+            else:
+                new_numeric = None
+
+            new_object_data = {}
+            for col, arr in self._object_data.items():
+                new_object_data[col] = arr[:0]
+
+            return DataFrame._from_parts(
+                numeric_data=new_numeric,
+                numeric_cols=self._numeric_cols,
+                numeric_dtypes=self._numeric_dtypes,
+                object_data=new_object_data,
+                index=self._index[:0],
+                column_order=self._column_order,
+            )
+
         if self._numeric_data is not None:
             new_numeric = self._numeric_data[-n:]
         else:

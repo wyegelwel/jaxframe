@@ -970,23 +970,44 @@ class DataFrame:
             raise ValueError("No numeric columns for where operation")
 
         if isinstance(condition, DataFrame):
-            # Apply where column by column
-            result_data = {}
-            for col in self._column_order:
-                if col in self._column_to_block and col in condition._column_to_block:
-                    col_data = self._get_column_data(col)
-                    cond_data = condition._get_column_data(col)
-                    result_data[col] = jnp.where(cond_data, col_data, fill_value)
-            return DataFrame(result_data, index=self._index.copy())
+            # Apply where column by column, preserving dtype blocks
+            new_dtype_blocks = {}
+            for dtype, block in self._dtype_blocks.items():
+                # Apply where to all columns in this block
+                new_block_cols = []
+                for col in self._column_order:
+                    if col in self._column_to_block:
+                        col_dtype, col_idx = self._column_to_block[col]
+                        if col_dtype == dtype and col in condition._column_to_block:
+                            col_data = block[:, col_idx]
+                            cond_data = condition._get_column_data(col)
+                            new_col = jnp.where(cond_data, col_data, fill_value)
+                            new_block_cols.append(new_col.reshape(-1, 1))
+
+                if new_block_cols:
+                    new_dtype_blocks[dtype] = jnp.concatenate(new_block_cols, axis=1)
+
+            return DataFrame._from_parts(
+                dtype_blocks=new_dtype_blocks,
+                column_to_block=self._column_to_block.copy(),
+                object_data=self._object_data.copy(),
+                index=self._index,
+                column_order=self._column_order,
+            )
         else:
             # Scalar or array condition - apply to all columns
             mask = jnp.asarray(condition)
-            result_data = {}
-            for col in self._column_order:
-                if col in self._column_to_block:
-                    col_data = self._get_column_data(col)
-                    result_data[col] = jnp.where(mask, col_data, fill_value)
-            return DataFrame(result_data, index=self._index.copy())
+            new_dtype_blocks = {}
+            for dtype, block in self._dtype_blocks.items():
+                new_dtype_blocks[dtype] = jnp.where(mask[:, None], block, fill_value)
+
+            return DataFrame._from_parts(
+                dtype_blocks=new_dtype_blocks,
+                column_to_block=self._column_to_block.copy(),
+                object_data=self._object_data.copy(),
+                index=self._index,
+                column_order=self._column_order,
+            )
 
     def mask(self, condition, fill_value):
         """
@@ -1166,28 +1187,28 @@ class DataFrame:
     # ========================================
 
     def __gt__(self, other) -> 'DataFrame':
-        """Greater than comparison (JIT-compatible with type promotion)."""
-        return self._apply_elementwise(other, jnp.greater, "greater than")
+        """Greater than comparison (JIT-compatible, returns boolean)."""
+        return self._apply_comparison(other, jnp.greater, "greater than")
 
     def __ge__(self, other) -> 'DataFrame':
-        """Greater than or equal comparison (JIT-compatible with type promotion)."""
-        return self._apply_elementwise(other, jnp.greater_equal, "greater than or equal")
+        """Greater than or equal comparison (JIT-compatible, returns boolean)."""
+        return self._apply_comparison(other, jnp.greater_equal, "greater than or equal")
 
     def __lt__(self, other) -> 'DataFrame':
-        """Less than comparison (JIT-compatible with type promotion)."""
-        return self._apply_elementwise(other, jnp.less, "less than")
+        """Less than comparison (JIT-compatible, returns boolean)."""
+        return self._apply_comparison(other, jnp.less, "less than")
 
     def __le__(self, other) -> 'DataFrame':
-        """Less than or equal comparison (JIT-compatible with type promotion)."""
-        return self._apply_elementwise(other, jnp.less_equal, "less than or equal")
+        """Less than or equal comparison (JIT-compatible, returns boolean)."""
+        return self._apply_comparison(other, jnp.less_equal, "less than or equal")
 
     def __eq__(self, other) -> 'DataFrame':
-        """Equality comparison (JIT-compatible with type promotion)."""
-        return self._apply_elementwise(other, jnp.equal, "equality")
+        """Equality comparison (JIT-compatible, returns boolean)."""
+        return self._apply_comparison(other, jnp.equal, "equality")
 
     def __ne__(self, other) -> 'DataFrame':
-        """Not equal comparison (JIT-compatible with type promotion)."""
-        return self._apply_elementwise(other, jnp.not_equal, "not equal")
+        """Not equal comparison (JIT-compatible, returns boolean)."""
+        return self._apply_comparison(other, jnp.not_equal, "not equal")
 
     # ========================================
     # Logical operations
@@ -1230,6 +1251,108 @@ class DataFrame:
             return self._object_data[col_name]
         else:
             raise KeyError(f"Column '{col_name}' not found")
+
+    def _apply_comparison(self, other, op, op_name: str = "comparison"):
+        """
+        Apply comparison operation that returns boolean results (JIT-compatible).
+
+        Args:
+            other: scalar, DataFrame, or array
+            op: Comparison operation function (e.g., jnp.greater)
+            op_name: Name of operation for error messages
+
+        Returns:
+            New DataFrame with boolean results
+        """
+        if isinstance(other, (int, float, bool, np.number)):
+            # Scalar comparison - apply to each dtype block
+            new_dtype_blocks = {}
+            bool_dtype = np.dtype(bool)
+            bool_cols = []
+
+            for col in self._column_order:
+                if col in self._column_to_block:
+                    col_data = self._get_column_data(col)
+                    bool_result = op(col_data, other)  # Returns bool
+                    bool_cols.append(bool_result.reshape(-1, 1))
+
+            if bool_cols:
+                new_dtype_blocks[bool_dtype] = jnp.concatenate(bool_cols, axis=1)
+
+            # Update column_to_block mapping - all columns now have bool dtype
+            new_column_to_block = {}
+            for idx, col in enumerate([c for c in self._column_order if c in self._column_to_block]):
+                new_column_to_block[col] = (bool_dtype, idx)
+
+            return DataFrame._from_parts(
+                dtype_blocks=new_dtype_blocks,
+                column_to_block=new_column_to_block,
+                object_data={},
+                index=self._index,
+                column_order=self._column_order,
+            )
+
+        elif isinstance(other, DataFrame):
+            # DataFrame comparison
+            if self._column_order != other._column_order:
+                raise ValueError(f"Column mismatch for {op_name}")
+
+            new_dtype_blocks = {}
+            bool_dtype = np.dtype(bool)
+            bool_cols = []
+            col_names = []
+
+            for col in self._column_order:
+                if col in self._column_to_block and col in other._column_to_block:
+                    left_data = self._get_column_data(col)
+                    right_data = other._get_column_data(col)
+                    bool_result = op(left_data, right_data)  # Returns bool
+                    bool_cols.append(bool_result.reshape(-1, 1))
+                    col_names.append(col)
+
+            if bool_cols:
+                new_dtype_blocks[bool_dtype] = jnp.concatenate(bool_cols, axis=1)
+
+            new_column_to_block = {col: (bool_dtype, idx) for idx, col in enumerate(col_names)}
+
+            return DataFrame._from_parts(
+                dtype_blocks=new_dtype_blocks,
+                column_to_block=new_column_to_block,
+                object_data={},
+                index=self._index,
+                column_order=tuple(col_names),
+            )
+
+        elif isinstance(other, (np.ndarray, jnp.ndarray)):
+            # Array comparison
+            other_arr = jnp.asarray(other)
+            new_dtype_blocks = {}
+            bool_dtype = np.dtype(bool)
+            bool_cols = []
+
+            for col in self._column_order:
+                if col in self._column_to_block:
+                    col_data = self._get_column_data(col)
+                    bool_result = op(col_data, other_arr)  # Returns bool
+                    bool_cols.append(bool_result.reshape(-1, 1))
+
+            if bool_cols:
+                new_dtype_blocks[bool_dtype] = jnp.concatenate(bool_cols, axis=1)
+
+            new_column_to_block = {}
+            for idx, col in enumerate([c for c in self._column_order if c in self._column_to_block]):
+                new_column_to_block[col] = (bool_dtype, idx)
+
+            return DataFrame._from_parts(
+                dtype_blocks=new_dtype_blocks,
+                column_to_block=new_column_to_block,
+                object_data={},
+                index=self._index,
+                column_order=self._column_order,
+            )
+
+        else:
+            raise TypeError(f"Unsupported operand type for {op_name}: {type(other)}")
 
     def _apply_elementwise(self, other, op, op_name: str = "operation"):
         """
@@ -1288,28 +1411,58 @@ class DataFrame:
 
         elif type(other).__name__ == 'Series':
             # Series broadcasts across rows (like pandas)
+            # Each column gets the corresponding value from the Series
             result_data = {}
             for col in self._column_order:
                 if col in self._column_to_block:
                     col_data = self._get_column_data(col)
                     dtype, _ = self._column_to_block[col]
+
+                    # Find this column's value in the Series
+                    # Series._index contains column names, Series._data contains values
+                    if hasattr(other, '_index'):
+                        # Find column position in Series index
+                        series_idx = np.where(other._index == col)[0]
+                        if len(series_idx) > 0:
+                            series_value = other._data[series_idx[0]]
+                        else:
+                            continue  # Column not in Series, skip it
+                    else:
+                        # Fallback: use index in column_order
+                        numeric_cols = [c for c in self._column_order if c in self._column_to_block]
+                        col_idx = numeric_cols.index(col)
+                        series_value = other._data[col_idx]
+
                     result_dtype = jnp.result_type(dtype, other._data.dtype)
-                    result_data[col] = op(col_data, other._data).astype(result_dtype)
+                    result_data[col] = op(col_data, series_value).astype(result_dtype)
 
             return DataFrame(result_data, index=self._index.copy())
 
         elif isinstance(other, (np.ndarray, jnp.ndarray)):
-            # Array operation: broadcast to each column
+            # Array operation
             other_arr = jnp.asarray(other)
-            result_data = {}
-            for col in self._column_order:
-                if col in self._column_to_block:
+
+            # Handle 1D arrays: broadcast across columns (like pandas)
+            if other_arr.ndim == 1 and len(other_arr) == len(self._column_order):
+                # Array length matches number of columns - broadcast across columns
+                result_data = {}
+                numeric_cols = [c for c in self._column_order if c in self._column_to_block]
+                for idx, col in enumerate(numeric_cols):
                     col_data = self._get_column_data(col)
                     dtype, _ = self._column_to_block[col]
                     result_dtype = jnp.result_type(dtype, other_arr.dtype)
-                    result_data[col] = op(col_data, other_arr).astype(result_dtype)
-
-            return DataFrame(result_data, index=self._index.copy())
+                    result_data[col] = op(col_data, other_arr[idx]).astype(result_dtype)
+                return DataFrame(result_data, index=self._index.copy())
+            else:
+                # Array broadcasts element-wise
+                result_data = {}
+                for col in self._column_order:
+                    if col in self._column_to_block:
+                        col_data = self._get_column_data(col)
+                        dtype, _ = self._column_to_block[col]
+                        result_dtype = jnp.result_type(dtype, other_arr.dtype)
+                        result_data[col] = op(col_data, other_arr).astype(result_dtype)
+                return DataFrame(result_data, index=self._index.copy())
 
         else:
             raise TypeError(f"Unsupported operand type for {op_name}: {type(other)}")

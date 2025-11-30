@@ -320,19 +320,19 @@ class TestTimeSeriesEdgeCases:
         np.testing.assert_allclose(jf_result.values, pd_result.values, rtol=1e-5)
 
     def test_diff_first_row(self):
-        """Test that diff first row matches pandas with fillna(0)."""
+        """Test that diff first row matches pandas (NaN for undefined values)."""
         jf_result = self.jf_df.diff(1)
-        pd_result = self.pd_df.diff(1).fillna(0)
+        pd_result = self.pd_df.diff(1)
 
-        # Check first row is all zeros
-        assert np.allclose(jf_result.values[0], 0.0)
-        np.testing.assert_allclose(jf_result.values, pd_result.values, rtol=1e-5)
+        # Check first row is all NaN (matching pandas)
+        assert np.all(np.isnan(jf_result.values[0]))
+        np.testing.assert_array_equal(jf_result.values, pd_result.values)
 
     def test_diff_large_period(self):
-        """Test diff with period larger than half the data."""
+        """Test diff with period larger than half the data (matches pandas with NaN)."""
         jf_result = self.jf_df.diff(3)
-        pd_result = self.pd_df.diff(3).fillna(0)
-        np.testing.assert_allclose(jf_result.values, pd_result.values, rtol=1e-5)
+        pd_result = self.pd_df.diff(3)
+        np.testing.assert_array_equal(jf_result.values, pd_result.values)
 
     def test_pct_change_with_zeros(self):
         """Test pct_change when previous value is zero."""
@@ -401,26 +401,22 @@ class TestKnownDifferences:
     These tests document intentional design differences or limitations.
     """
 
-    def test_nan_handling_difference(self):
+    def test_nan_handling_equivalence(self):
         """
-        KNOWN DIFFERENCE: JAXFrame uses 0 fill instead of NaN.
+        JAXFrame now fully supports NaN and matches pandas behavior.
 
         Pandas uses NaN for undefined values (e.g., first row of diff()).
-        JAXFrame uses 0.0 as fill_value because NaN is not JIT-friendly.
+        JAXFrame now does the same (NaN is JIT-compatible in JAX).
         """
         data = {'a': [1.0, 2.0, 3.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
         jf_result = jf_df.diff(1)
-        pd_result_with_nan = pd_df.diff(1)  # First value is NaN
-        pd_result_filled = pd_result_with_nan.fillna(0)  # Our equivalent
+        pd_result = pd_df.diff(1)
 
-        # JAXFrame matches fillna(0), not raw diff()
-        np.testing.assert_allclose(jf_result.values, pd_result_filled.values, rtol=1e-5)
-
-        # But doesn't match raw diff with NaN
-        assert not np.array_equal(jf_result.values, pd_result_with_nan.values, equal_nan=True)
+        # JAXFrame now matches pandas exactly, including NaN
+        np.testing.assert_array_equal(jf_result.values, pd_result.values)
 
     def test_dtype_preservation_difference(self):
         """

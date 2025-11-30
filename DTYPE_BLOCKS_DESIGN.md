@@ -239,9 +239,41 @@ def tree_flatten(self):
    - Matches pandas dtype preservation behavior
    - More predictable type behavior
 
+## NaN Support
+
+JAXFrame fully supports NaN values and matches pandas behavior:
+
+### Time Series Operations
+- `shift()`: Uses `jnp.nan` as default fill_value (matching pandas)
+- `diff()`: Returns NaN for first `periods` rows (matching pandas)
+- `pct_change()`: Returns NaN for undefined values (matching pandas)
+
+### Reduction Operations
+All reduction operations skip NaN values by default (matching pandas):
+- `sum()`: Uses `jnp.nansum()`
+- `mean()`: Uses `jnp.nanmean()`
+- `std()`: Uses `jnp.nanstd()`
+- `var()`: Uses `jnp.nanvar()`
+- `min()`: Uses `jnp.nanmin()`
+- `max()`: Uses `jnp.nanmax()`
+- `prod()`: Uses `jnp.nanprod()`
+
+### Arithmetic Operations
+NaN propagates through arithmetic operations as expected (IEEE 754):
+- `x + NaN = NaN`
+- `x * NaN = NaN`
+- NaN comparisons return False (except NaN != NaN returns True)
+
+### JIT Compatibility
+NaN is fully JIT-compatible in JAX and works correctly with:
+- `jax.jit()`
+- `jax.grad()`
+- `jax.vmap()`
+
 ## Migration Notes
 
 - Existing code should continue to work
 - `values` property behavior changes slightly (returns promoted type, not always float64)
 - JIT compilation artifacts may grow slightly (multiple arrays)
 - Initial implementation may be slower due to complexity, but runtime should improve
+- **NaN behavior now matches pandas exactly** (previously used 0 as fill_value)

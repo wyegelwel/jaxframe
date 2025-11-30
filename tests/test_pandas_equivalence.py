@@ -570,13 +570,12 @@ class TestTimeSeriesMethods:
         )
 
     def test_diff(self):
-        """Test diff method."""
+        """Test diff method (now matches pandas with NaN)."""
         jf_result = self.jf_df.diff(1)
-        pd_result = self.pd_df.diff(1).fillna(0)  # pandas uses NaN, we use 0
-        np.testing.assert_allclose(
+        pd_result = self.pd_df.diff(1)  # JAXFrame now uses NaN like pandas
+        np.testing.assert_array_equal(
             jf_result.values,
-            pd_result.values,
-            rtol=1e-5
+            pd_result.values
         )
 
     def test_pct_change(self):

@@ -586,6 +586,8 @@ class DataFrame:
         """
         Sum along axis (JIT-compatible).
 
+        Skips NaN values by default (matching pandas behavior).
+
         Args:
             axis: 0 for column-wise sum, 1 for row-wise sum, None for total sum
 
@@ -595,7 +597,7 @@ class DataFrame:
         if self._numeric_data is None:
             raise ValueError("No numeric columns to sum")
 
-        result = jnp.sum(self._numeric_data, axis=axis)
+        result = jnp.nansum(self._numeric_data, axis=axis)
 
         if axis == 0:
             # Column-wise sum -> Series
@@ -608,11 +610,15 @@ class DataFrame:
             return result
 
     def mean(self, axis: Optional[int] = 0):
-        """Mean along axis (JIT-compatible)."""
+        """
+        Mean along axis (JIT-compatible).
+
+        Skips NaN values by default (matching pandas behavior).
+        """
         if self._numeric_data is None:
             raise ValueError("No numeric columns to compute mean")
 
-        result = jnp.mean(self._numeric_data, axis=axis)
+        result = jnp.nanmean(self._numeric_data, axis=axis)
 
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name='mean')
@@ -625,6 +631,8 @@ class DataFrame:
         """
         Standard deviation along axis (JIT-compatible, differentiable).
 
+        Skips NaN values by default (matching pandas behavior).
+
         Args:
             axis: 0 for column-wise, 1 for row-wise, None for total
             ddof: Delta degrees of freedom (default 1 for sample std)
@@ -632,7 +640,7 @@ class DataFrame:
         if self._numeric_data is None:
             raise ValueError("No numeric columns to compute std")
 
-        result = jnp.std(self._numeric_data, axis=axis, ddof=ddof)
+        result = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
 
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name='std')
@@ -645,6 +653,8 @@ class DataFrame:
         """
         Variance along axis (JIT-compatible, differentiable).
 
+        Skips NaN values by default (matching pandas behavior).
+
         Args:
             axis: 0 for column-wise, 1 for row-wise, None for total
             ddof: Delta degrees of freedom (default 1 for sample variance)
@@ -652,7 +662,7 @@ class DataFrame:
         if self._numeric_data is None:
             raise ValueError("No numeric columns to compute variance")
 
-        result = jnp.var(self._numeric_data, axis=axis, ddof=ddof)
+        result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
 
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name='var')
@@ -665,12 +675,14 @@ class DataFrame:
         """
         Minimum along axis (JIT-compatible).
 
+        Skips NaN values by default (matching pandas behavior).
+
         Note: Gradient is non-smooth at the minimum point.
         """
         if self._numeric_data is None:
             raise ValueError("No numeric columns to compute min")
 
-        result = jnp.min(self._numeric_data, axis=axis)
+        result = jnp.nanmin(self._numeric_data, axis=axis)
 
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name='min')
@@ -683,12 +695,14 @@ class DataFrame:
         """
         Maximum along axis (JIT-compatible).
 
+        Skips NaN values by default (matching pandas behavior).
+
         Note: Gradient is non-smooth at the maximum point.
         """
         if self._numeric_data is None:
             raise ValueError("No numeric columns to compute max")
 
-        result = jnp.max(self._numeric_data, axis=axis)
+        result = jnp.nanmax(self._numeric_data, axis=axis)
 
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name='max')
@@ -698,11 +712,15 @@ class DataFrame:
             return result
 
     def prod(self, axis: Optional[int] = 0):
-        """Product along axis (JIT-compatible, differentiable)."""
+        """
+        Product along axis (JIT-compatible, differentiable).
+
+        Skips NaN values by default (matching pandas behavior).
+        """
         if self._numeric_data is None:
             raise ValueError("No numeric columns to compute product")
 
-        result = jnp.prod(self._numeric_data, axis=axis)
+        result = jnp.nanprod(self._numeric_data, axis=axis)
 
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name='prod')
@@ -826,13 +844,13 @@ class DataFrame:
     # Time series operations
     # ========================================
 
-    def shift(self, periods: int = 1, fill_value=0.0):
+    def shift(self, periods: int = 1, fill_value=None):
         """
         Shift data by n periods (JIT-compatible, differentiable).
 
         Args:
             periods: Number of periods to shift (positive for forward, negative for backward)
-            fill_value: Value to use for padded entries
+            fill_value: Value to use for padded entries (default: jnp.nan)
 
         Returns:
             DataFrame with shifted values
@@ -846,6 +864,10 @@ class DataFrame:
 
         if periods == 0:
             return self
+
+        # Use NaN as default fill_value (matching pandas behavior)
+        if fill_value is None:
+            fill_value = jnp.nan
 
         n_rows = len(self._index)
 
@@ -886,7 +908,7 @@ class DataFrame:
             periods: Number of periods for differencing
 
         Returns:
-            DataFrame with differences
+            DataFrame with differences (NaN for undefined values, matching pandas)
 
         Examples:
             >>> df.diff()  # df[i] - df[i-1]
@@ -895,7 +917,8 @@ class DataFrame:
         if not self._dtype_blocks:
             raise ValueError("No numeric columns for diff")
 
-        shifted = self.shift(periods, fill_value=0.0)
+        # Use NaN for shifted values (default behavior)
+        shifted = self.shift(periods)
 
         # Calculate differences for each column
         result_data = {}
@@ -905,16 +928,15 @@ class DataFrame:
                 shifted_data = shifted._get_column_data(col)
                 diff_col = col_data - shifted_data
 
-                # Set first 'periods' rows to 0 (matching pandas behavior with fillna(0))
-                # This is because pandas returns NaN for the first 'periods' rows
+                # Set first 'periods' rows to NaN (matching pandas behavior)
                 if periods > 0:
                     mask = jnp.arange(len(self._index)) < periods
-                    diff_col = jnp.where(mask, 0.0, diff_col)
+                    diff_col = jnp.where(mask, jnp.nan, diff_col)
                 elif periods < 0:
                     # For negative periods, mask the last abs(periods) rows
                     abs_periods = abs(periods)
                     mask = jnp.arange(len(self._index)) >= (len(self._index) - abs_periods)
-                    diff_col = jnp.where(mask, 0.0, diff_col)
+                    diff_col = jnp.where(mask, jnp.nan, diff_col)
 
                 result_data[col] = diff_col
 
@@ -928,7 +950,7 @@ class DataFrame:
             periods: Number of periods for percentage change
 
         Returns:
-            DataFrame with percentage changes
+            DataFrame with percentage changes (NaN for undefined values, matching pandas)
 
         Formula: (current - previous) / previous
 
@@ -938,7 +960,9 @@ class DataFrame:
         if not self._dtype_blocks:
             raise ValueError("No numeric columns for pct_change")
 
-        shifted = self.shift(periods, fill_value=1.0)  # Use 1.0 to avoid division by zero in padding
+        # Use NaN for shifted values (default behavior)
+        # This will naturally produce NaN in the output for undefined values
+        shifted = self.shift(periods)
 
         # Calculate percentage change for each column
         result_data = {}

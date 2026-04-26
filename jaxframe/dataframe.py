@@ -2149,6 +2149,39 @@ class SeriesGroupBy:
         last_idx = jax.ops.segment_max(indices, self._segment_ids, self._num_groups)
         return self._result_series(self._data[last_idx])
 
+    def agg(self, func):
+        """Aggregate using one or more functions.
+
+        Args:
+            func: string name ('sum', 'mean', etc.) or list of strings.
+        """
+        if isinstance(func, str):
+            return getattr(self, func)()
+        if isinstance(func, list):
+            # Multiple functions -> DataFrame
+            results = {}
+            for f in func:
+                results[f] = getattr(self, f)().values
+            return DataFrame(results, index=np.asarray(self._group_keys))
+        raise ValueError(f"Unsupported agg func type: {type(func)}")
+
+    def transform(self, func):
+        """Apply aggregation and broadcast back to original shape.
+
+        Args:
+            func: string name ('sum', 'mean', etc.)
+        """
+        if isinstance(func, str):
+            agg_result = getattr(self, func)().values
+        else:
+            raise ValueError("transform requires a string function name")
+        # Broadcast group results back to each row
+        return Series(
+            agg_result[self._segment_ids],
+            index=np.arange(len(self._data)),
+            name=self._name,
+        )
+
 
 class DataFrameGroupBy:
     """GroupBy on a DataFrame. Aggregations use jax.ops.segment_* (JIT+grad)."""
@@ -2243,6 +2276,35 @@ class DataFrameGroupBy:
             return sum_sq / (counts - ddof)
 
         return self._apply_segment_op(_var_col)
+
+    def prod(self):
+        return self._apply_segment_op(
+            lambda d: jax.ops.segment_prod(d, self._segment_ids, self._num_groups)
+        )
+
+    def first(self):
+        indices = jnp.arange(len(self._segment_ids))
+        first_idx = jax.ops.segment_min(indices, self._segment_ids, self._num_groups)
+
+        def _first_col(d):
+            return d[first_idx]
+
+        return self._apply_segment_op(_first_col)
+
+    def last(self):
+        indices = jnp.arange(len(self._segment_ids))
+        last_idx = jax.ops.segment_max(indices, self._segment_ids, self._num_groups)
+
+        def _last_col(d):
+            return d[last_idx]
+
+        return self._apply_segment_op(_last_col)
+
+    def agg(self, func):
+        """Aggregate using a function name string."""
+        if isinstance(func, str):
+            return getattr(self, func)()
+        raise ValueError(f"Unsupported agg func type: {type(func)}")
 
 
 # ========================================

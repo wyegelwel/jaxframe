@@ -596,3 +596,163 @@ class TestGroupBy:
             pdf.groupby("key").mean(),
             jdf.groupby("key").mean(),
         )
+
+    def test_df_min(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").min(),
+            jdf.groupby("key").min(),
+        )
+
+    def test_df_max(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").max(),
+            jdf.groupby("key").max(),
+        )
+
+    def test_df_std(self):
+        from jaxframe import DataFrame
+
+        data = {
+            "key": [1.0, 1.0, 2.0, 2.0, 2.0],
+            "a": [10.0, 20.0, 30.0, 40.0, 50.0],
+            "b": [100.0, 200.0, 300.0, 400.0, 500.0],
+        }
+        pdf, jdf = pd.DataFrame(data), DataFrame(data)
+        self._compare_df(
+            pdf.groupby("key").std(),
+            jdf.groupby("key").std(),
+        )
+
+    def test_df_var(self):
+        from jaxframe import DataFrame
+
+        data = {
+            "key": [1.0, 1.0, 2.0, 2.0, 2.0],
+            "a": [10.0, 20.0, 30.0, 40.0, 50.0],
+            "b": [100.0, 200.0, 300.0, 400.0, 500.0],
+        }
+        pdf, jdf = pd.DataFrame(data), DataFrame(data)
+        self._compare_df(
+            pdf.groupby("key").var(),
+            jdf.groupby("key").var(),
+        )
+
+    def test_df_prod(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").prod(),
+            jdf.groupby("key").prod(),
+        )
+
+    def test_df_first(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").first(),
+            jdf.groupby("key").first(),
+        )
+
+    def test_df_last(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").last(),
+            jdf.groupby("key").last(),
+        )
+
+    def test_series_prod(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].prod(),
+            jdf.groupby("key")["val"].prod(),
+        )
+
+    def test_series_first(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].first(),
+            jdf.groupby("key")["val"].first(),
+        )
+
+    def test_series_last(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].last(),
+            jdf.groupby("key")["val"].last(),
+        )
+
+    def test_series_agg_single(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].agg("sum"),
+            jdf.groupby("key")["val"].agg("sum"),
+        )
+
+    def test_series_agg_multi(self):
+        """agg with multiple functions returns DataFrame."""
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        pd_result = pdf.groupby("key")["val"].agg(["sum", "mean"])
+        jf_result = jdf.groupby("key")["val"].agg(["sum", "mean"])
+        pd_sorted = pd_result.sort_index()
+        jf_pandas = jf_result.to_pandas().sort_index()
+        np.testing.assert_allclose(
+            jf_pandas.values.astype(np.float32),
+            pd_sorted.values.astype(np.float32),
+            rtol=1e-5,
+        )
+
+    def test_df_agg_single(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").agg("sum"),
+            jdf.groupby("key").agg("sum"),
+        )
+
+    def test_transform_sum(self):
+        """transform broadcasts group result back to original shape."""
+        from jaxframe import DataFrame
+
+        data = {"key": [1.0, 1.0, 2.0, 2.0], "val": [10.0, 20.0, 30.0, 40.0]}
+        pdf, jdf = pd.DataFrame(data), DataFrame(data)
+        pd_result = pdf.groupby("key")["val"].transform("sum")
+        jf_result = jdf.groupby("key")["val"].transform("sum")
+        np.testing.assert_allclose(
+            np.asarray(jf_result.values).astype(np.float32),
+            pd_result.values.astype(np.float32),
+            rtol=1e-5,
+        )
+
+    def test_transform_mean(self):
+        from jaxframe import DataFrame
+
+        data = {"key": [1.0, 1.0, 2.0, 2.0], "val": [10.0, 20.0, 30.0, 40.0]}
+        pdf, jdf = pd.DataFrame(data), DataFrame(data)
+        pd_result = pdf.groupby("key")["val"].transform("mean")
+        jf_result = jdf.groupby("key")["val"].transform("mean")
+        np.testing.assert_allclose(
+            np.asarray(jf_result.values).astype(np.float32),
+            pd_result.values.astype(np.float32),
+            rtol=1e-5,
+        )

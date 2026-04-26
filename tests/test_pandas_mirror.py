@@ -1198,3 +1198,70 @@ def test_value_counts_series():
         jf_idx[order].astype(np.float32),
         pd_sorted.index.values.astype(np.float32),
     )
+
+
+# ============================
+# Session 18: reset_index, set_index, sort_index
+# ============================
+
+
+class TestIndexOps:
+    def test_reset_index(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        jdf = DataFrame(data, index=np.array([10, 20, 30]))
+        result = jdf.reset_index()
+        # After reset, index should be 0, 1, 2
+        np.testing.assert_array_equal(result._index, np.arange(3))
+        # Values should be unchanged
+        np.testing.assert_allclose(
+            np.asarray(result.values),
+            np.asarray(jdf.values),
+        )
+
+    def test_reset_index_drop_false(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        pdf = pd.DataFrame(data, index=pd.Index([10, 20, 30], name="idx"))
+        jdf = DataFrame(data, index=np.array([10, 20, 30]))
+        jdf._index_name = "idx"
+        result = jdf.reset_index(drop=False)
+        pdf.reset_index()
+        # Should have 3 columns: idx, a, b
+        assert result.shape[1] == 3
+
+    def test_set_index(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        jdf = DataFrame(data)
+        result = jdf.set_index("a")
+        np.testing.assert_allclose(
+            np.asarray(result._index),
+            np.array([1.0, 2.0, 3.0]),
+        )
+        # Column "a" should be removed
+        assert "a" not in result._column_order
+
+    def test_sort_index(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [3.0, 1.0, 2.0], "b": [30.0, 10.0, 20.0]}
+        jdf = DataFrame(data, index=np.array([2, 0, 1]))
+        result = jdf.sort_index()
+        np.testing.assert_array_equal(result._index, np.array([0, 1, 2]))
+        # Values should be reordered
+        np.testing.assert_allclose(
+            np.asarray(result["a"].values),
+            np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        )
+
+    def test_sort_index_descending(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [3.0, 1.0, 2.0], "b": [30.0, 10.0, 20.0]}
+        jdf = DataFrame(data, index=np.array([2, 0, 1]))
+        result = jdf.sort_index(ascending=False)
+        np.testing.assert_array_equal(result._index, np.array([2, 1, 0]))

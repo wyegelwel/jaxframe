@@ -1099,6 +1099,72 @@ class DataFrame:
             column_order=list(self._column_order),
         )
 
+    def sort_index(self, ascending=True):
+        """Sort by index. Not JIT-compatible (uses np.argsort on index)."""
+        order = np.argsort(self._index)
+        if not ascending:
+            order = order[::-1]
+        new_blocks = {dt: block[order] for dt, block in self._dtype_blocks.items()}
+        new_obj = {k: v[order] for k, v in self._object_data.items()}
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=dict(self._column_to_block),
+            object_data=new_obj,
+            index=self._index[order],
+            column_order=list(self._column_order),
+        )
+
+    def reset_index(self, drop=True):
+        """Reset index to default integer range.
+
+        Args:
+            drop: If True, discard the old index. If False, insert it as a column.
+        """
+        if drop:
+            return DataFrame._from_parts(
+                dtype_blocks={dt: block.copy() for dt, block in self._dtype_blocks.items()},
+                column_to_block=dict(self._column_to_block),
+                object_data=dict(self._object_data),
+                index=np.arange(len(self._index)),
+                column_order=list(self._column_order),
+            )
+        else:
+            # Insert old index as a column
+            idx_name = getattr(self, "_index_name", "index")
+            data = {}
+            data[idx_name] = np.asarray(self._index)
+            for col in self._column_order:
+                if col in self._column_to_block:
+                    dtype, ci = self._column_to_block[col]
+                    data[col] = self._dtype_blocks[dtype][:, ci]
+                elif col in self._object_data:
+                    data[col] = self._object_data[col]
+            return DataFrame(data)
+
+    def set_index(self, keys):
+        """Set a column as the index, removing it from columns."""
+        if isinstance(keys, str):
+            keys = keys
+        # Get the column data for the new index
+        if keys in self._column_to_block:
+            dtype, idx = self._column_to_block[keys]
+            new_index = np.asarray(self._dtype_blocks[dtype][:, idx])
+        elif keys in self._object_data:
+            new_index = self._object_data[keys]
+        else:
+            raise KeyError(f"Column '{keys}' not found")
+        return self.drop(columns=[keys])._replace_index(new_index)
+
+    def _replace_index(self, new_index):
+        """Return a copy with a new index."""
+        return DataFrame._from_parts(
+            dtype_blocks=dict(self._dtype_blocks),
+            column_to_block=dict(self._column_to_block),
+            object_data=dict(self._object_data),
+            index=new_index,
+            column_order=list(self._column_order),
+        )
+
     # ========================================
     # Describe & quantile
     # ========================================

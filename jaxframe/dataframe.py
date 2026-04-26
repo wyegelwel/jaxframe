@@ -751,6 +751,71 @@ class DataFrame:
         """Absolute value (JIT-compatible). Gradient is non-smooth at zero."""
         return self._apply_blockwise(jnp.abs)
 
+    def all(self, axis: int = 0):
+        """Check if all values are true along axis (JIT-compatible). Boolean output."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        result = jnp.all(self._numeric_data.astype(bool), axis=axis)
+        if axis == 0:
+            return Series(result, index=np.array(self._numeric_cols), name="all")
+        else:
+            return Series(result, index=self._index, name="all")
+
+    def any(self, axis: int = 0):
+        """Check if any value is true along axis (JIT-compatible). Boolean output."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        result = jnp.any(self._numeric_data.astype(bool), axis=axis)
+        if axis == 0:
+            return Series(result, index=np.array(self._numeric_cols), name="any")
+        else:
+            return Series(result, index=self._index, name="any")
+
+    def round(self, decimals: int = 0):
+        """Round to given number of decimals (JIT-compatible, differentiable=False)."""
+        return self._apply_blockwise(lambda block: jnp.round(block, decimals))
+
+    def idxmin(self, axis: int = 0):
+        """Return index of first occurrence of minimum (JIT-compatible). Not differentiable."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        indices = jnp.argmin(self._numeric_data, axis=axis)
+        if axis == 0:
+            # Use jnp array for index to keep JIT-compatible
+            idx_arr = jnp.asarray(self._index)
+            result = jnp.take(idx_arr, indices)
+            return Series(result, index=np.array(self._numeric_cols), name="idxmin")
+        else:
+            col_names = np.array(self._numeric_cols)
+            result = col_names[indices]
+            return Series(result, index=self._index, name="idxmin")
+
+    def idxmax(self, axis: int = 0):
+        """Return index of first occurrence of maximum (JIT-compatible). Not differentiable."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        indices = jnp.argmax(self._numeric_data, axis=axis)
+        if axis == 0:
+            idx_arr = jnp.asarray(self._index)
+            result = jnp.take(idx_arr, indices)
+            return Series(result, index=np.array(self._numeric_cols), name="idxmax")
+        else:
+            col_names = np.array(self._numeric_cols)
+            result = col_names[indices]
+            return Series(result, index=self._index, name="idxmax")
+
+    def isin(self, values):
+        """Check whether each element is in values (JIT-compatible). Boolean output."""
+        values_arr = jnp.asarray(values) if len(values) > 0 else jnp.array([])
+
+        def _check_block(block):
+            if len(values_arr) == 0:
+                return jnp.zeros_like(block, dtype=bool)
+            # Compare each element against all values: (n_rows, n_cols, 1) == (1, 1, n_values)
+            return jnp.any(block[..., None] == values_arr[None, None, :], axis=-1)
+
+        return self._apply_blockwise(_check_block)
+
     def _apply_cross_column(self, fn):
         """Apply fn across all numeric columns (axis=1 ops). JIT-compatible."""
         data = self.values  # (n_rows, n_numeric_cols)

@@ -64,6 +64,10 @@ All ops are JIT-compatible. The following are **not** differentiable (`jax.grad`
 | `groupby.count` | Same as count — integer output |
 | `groupby.prod` | JAX limitation: `scatter_mul` gradients require `unique_indices=True` |
 | `groupby.first`, `groupby.last` | Index-based gather via segment_min/max on indices — discrete |
+| `all`, `any` | Boolean output — not a real-valued function |
+| `round` | Step function — gradient is zero almost everywhere |
+| `idxmin`, `idxmax` | Discrete (argmin/argmax) — not differentiable |
+| `isin` | Boolean output — not a real-valued function |
 
 Everything else (sum, mean, std, var, arithmetic, clip, where, fillna, cumsum, cumprod, shift, apply, reverse ops, groupby.sum/mean/std/var, transform) **is differentiable**.
 

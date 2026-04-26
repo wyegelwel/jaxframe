@@ -62,6 +62,13 @@ OPERATIONS = [
     ("radd_sum", lambda df: (10 + df).sum(axis=None), True, True),
     ("rsub_sum", lambda df: (100 - df).sum(axis=None), True, True),
     ("rmul_sum", lambda df: (3 * df).sum(axis=None), True, True),
+    # Session 15: all, any, round, idxmin, idxmax, isin
+    ("all_sum", lambda df: df.all(axis=0).values.sum(), True, False),  # boolean output
+    ("any_sum", lambda df: df.any(axis=0).values.sum(), True, False),  # boolean output
+    ("round_sum", lambda df: df.round(1).sum(axis=None), True, False),
+    ("idxmin_sum", lambda df: df.idxmin(axis=0).values.sum(), True, False),  # discrete (argmin)
+    ("idxmax_sum", lambda df: df.idxmax(axis=0).values.sum(), True, False),  # discrete (argmax)
+    ("isin_sum", lambda df: df.isin([1.0, 4.0]).sum(axis=None), True, False),  # boolean output
 ]
 
 # GroupBy JAX compat — segment ops are JIT+grad compatible
@@ -74,7 +81,7 @@ GROUPBY_OPS = [
     ("gb_var", lambda sgb: sgb.var().values.sum(), True, True),
     ("gb_std", lambda sgb: sgb.std().values.sum(), True, True),
     ("gb_count", lambda sgb: sgb.count().values.sum(), True, False),
-    ("gb_prod", lambda sgb: sgb.prod().values.sum(), True, False),  # JAX: scatter_mul grad unimplemented
+    ("gb_prod", lambda sgb: sgb.prod().values.sum(), True, False),
     ("gb_first", lambda sgb: sgb.first().values.sum(), True, False),
     ("gb_last", lambda sgb: sgb.last().values.sum(), True, False),
     ("gb_transform_sum", lambda sgb: sgb.transform("sum").values.sum(), True, True),

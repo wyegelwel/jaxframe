@@ -947,3 +947,75 @@ class TestStrAccessor:
         jf_result = js.str.split("-")
         for p, j in zip(pd_result.values, jf_result):
             assert p == j
+
+
+# ============================
+# Session 15: all, any, round, idxmin, idxmax, isin
+# ============================
+
+WITH_ZEROS = {"a": [0.0, 1.0, 2.0], "b": [1.0, 1.0, 1.0]}
+ALL_ZEROS = {"a": [0.0, 0.0, 0.0], "b": [0.0, 0.0, 1.0]}
+
+ALL_ANY_CASES = [
+    ("all_axis0", NUMERIC_2COL, lambda df: df.all(axis=0)),
+    ("any_axis0", NUMERIC_2COL, lambda df: df.any(axis=0)),
+    ("all_axis0_with_zero", WITH_ZEROS, lambda df: df.all(axis=0)),
+    ("any_axis0_with_zero", ALL_ZEROS, lambda df: df.any(axis=0)),
+    ("all_axis1", NUMERIC_3COL, lambda df: df.all(axis=1)),
+    ("any_axis1", NUMERIC_3COL, lambda df: df.any(axis=1)),
+]
+
+
+@pytest.mark.parametrize("name,data,op", ALL_ANY_CASES, ids=[c[0] for c in ALL_ANY_CASES])
+def test_all_any(name, data, op):
+    run_equiv(data, op)
+
+
+ROUND_CASES = [
+    ("round_0", {"a": [1.234, 2.567, 3.891], "b": [4.123, 5.678, 6.999]}, lambda df: df.round(0)),
+    ("round_1", {"a": [1.234, 2.567, 3.891], "b": [4.123, 5.678, 6.999]}, lambda df: df.round(1)),
+    ("round_2", {"a": [1.234, 2.567, 3.891], "b": [4.123, 5.678, 6.999]}, lambda df: df.round(2)),
+]
+
+
+@pytest.mark.parametrize("name,data,op", ROUND_CASES, ids=[c[0] for c in ROUND_CASES])
+def test_round(name, data, op):
+    run_equiv(data, op)
+
+
+IDXMIN_IDXMAX_CASES = [
+    ("idxmin_axis0", NUMERIC_2COL, lambda df: df.idxmin(axis=0)),
+    ("idxmax_axis0", NUMERIC_2COL, lambda df: df.idxmax(axis=0)),
+    ("idxmin_negatives", WITH_NEGATIVES, lambda df: df.idxmin(axis=0)),
+    ("idxmax_negatives", WITH_NEGATIVES, lambda df: df.idxmax(axis=0)),
+]
+
+
+@pytest.mark.parametrize(
+    "name,data,op", IDXMIN_IDXMAX_CASES, ids=[c[0] for c in IDXMIN_IDXMAX_CASES]
+)
+def test_idxmin_idxmax(name, data, op):
+    # idxmin/idxmax returns index labels — compare as integers
+    from jaxframe import DataFrame
+
+    pdf = pd.DataFrame(data)
+    jdf = DataFrame(data)
+    pd_result = op(pdf)
+    jf_result = op(jdf)
+    np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values.astype(np.int64))
+
+
+ISIN_CASES = [
+    ("isin_basic", NUMERIC_2COL, lambda df: df.isin([1.0, 2.0, 10.0])),
+    ("isin_empty", NUMERIC_2COL, lambda df: df.isin([])),
+    (
+        "isin_all",
+        NUMERIC_2COL,
+        lambda df: df.isin([1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0]),
+    ),
+]
+
+
+@pytest.mark.parametrize("name,data,op", ISIN_CASES, ids=[c[0] for c in ISIN_CASES])
+def test_isin(name, data, op):
+    run_equiv(data, op)

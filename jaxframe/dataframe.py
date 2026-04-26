@@ -2075,6 +2075,11 @@ class Series:
         """Datetime accessor for Series containing datetime64 data."""
         return _DatetimeAccessor(self._data)
 
+    @property
+    def str(self):
+        """String accessor for Series containing string/object data."""
+        return _StringAccessor(self._data)
+
     def __repr__(self):
         """String representation."""
         lines = [f"Series(name={self._name}, shape={len(self._data)})"]
@@ -2129,6 +2134,46 @@ class _DatetimeAccessor:
     @property
     def date(self):
         return self._data.astype("datetime64[D]")
+
+
+class _StringAccessor:
+    """Accessor for string Series data. Operations return numpy arrays."""
+
+    def __init__(self, data):
+        self._data = np.asarray(data)
+
+    def lower(self):
+        return np.array([s.lower() for s in self._data], dtype=object)
+
+    def upper(self):
+        return np.array([s.upper() for s in self._data], dtype=object)
+
+    def strip(self):
+        return np.array([s.strip() for s in self._data], dtype=object)
+
+    def lstrip(self):
+        return np.array([s.lstrip() for s in self._data], dtype=object)
+
+    def rstrip(self):
+        return np.array([s.rstrip() for s in self._data], dtype=object)
+
+    def len(self):
+        return np.array([len(s) for s in self._data])
+
+    def contains(self, pat):
+        return np.array([pat in s for s in self._data])
+
+    def startswith(self, pat):
+        return np.array([s.startswith(pat) for s in self._data])
+
+    def endswith(self, pat):
+        return np.array([s.endswith(pat) for s in self._data])
+
+    def replace(self, old, new):
+        return np.array([s.replace(old, new) for s in self._data], dtype=object)
+
+    def split(self, sep=None):
+        return [s.split(sep) for s in self._data]
 
 
 # ========================================

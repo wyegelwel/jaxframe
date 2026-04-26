@@ -844,3 +844,106 @@ class TestDatetime:
         pd_dates = ps.dt.date.values.astype("datetime64[D]")
         jf_dates = np.asarray(js.dt.date).astype("datetime64[D]")
         np.testing.assert_array_equal(jf_dates, pd_dates)
+
+
+# ============================
+# .str accessor (Session 14)
+# ============================
+
+STR_DATA = ["Hello", "  World  ", "PYTHON", "foo bar", "test123"]
+
+
+class TestStrAccessor:
+    """Test .str accessor on Series with string data."""
+
+    def _compare(self, pd_result, jf_result):
+        np.testing.assert_array_equal(np.asarray(jf_result), pd_result.values)
+
+    def test_lower(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        self._compare(ps.str.lower(), js.str.lower())
+
+    def test_upper(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        self._compare(ps.str.upper(), js.str.upper())
+
+    def test_strip(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        self._compare(ps.str.strip(), js.str.strip())
+
+    def test_lstrip(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        self._compare(ps.str.lstrip(), js.str.lstrip())
+
+    def test_rstrip(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        self._compare(ps.str.rstrip(), js.str.rstrip())
+
+    def test_len(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        np.testing.assert_array_equal(np.asarray(js.str.len()), ps.str.len().values)
+
+    def test_contains(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        np.testing.assert_array_equal(
+            np.asarray(js.str.contains("o")), ps.str.contains("o", regex=False).values
+        )
+
+    def test_startswith(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        np.testing.assert_array_equal(
+            np.asarray(js.str.startswith("H")), ps.str.startswith("H").values
+        )
+
+    def test_endswith(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        np.testing.assert_array_equal(np.asarray(js.str.endswith("3")), ps.str.endswith("3").values)
+
+    def test_replace(self):
+        from jaxframe import Series
+
+        ps = pd.Series(STR_DATA)
+        js = Series(STR_DATA)
+        self._compare(
+            ps.str.replace("o", "0", regex=False),
+            js.str.replace("o", "0"),
+        )
+
+    def test_split(self):
+        from jaxframe import Series
+
+        data = ["a-b", "c-d-e", "f"]
+        ps = pd.Series(data)
+        js = Series(data)
+        # Compare element by element since split returns lists
+        pd_result = ps.str.split("-")
+        jf_result = js.str.split("-")
+        for p, j in zip(pd_result.values, jf_result):
+            assert p == j

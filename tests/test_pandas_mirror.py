@@ -307,3 +307,63 @@ class TestSeriesArithmetic:
         ps = pd.Series([-1.0, 2.0, -3.0])
         js = Series([-1.0, 2.0, -3.0])
         self._compare(ps.abs(), js.abs())
+
+
+# ============================
+# Pandas interop + copy (Session 3)
+# ============================
+
+
+class TestPandasInterop:
+    """Test to_pandas, from_pandas, to_numpy, copy."""
+
+    def test_to_pandas_roundtrip(self):
+        """DataFrame -> to_pandas() -> from_pandas() preserves data."""
+        from jaxframe import DataFrame
+
+        jdf = DataFrame(NUMERIC_3COL)
+        pdf = jdf.to_pandas()
+        assert isinstance(pdf, pd.DataFrame)
+        assert list(pdf.columns) == ["a", "b", "c"]
+        np.testing.assert_allclose(pdf.values, np.array(jdf.values), rtol=1e-5)
+
+    def test_from_pandas(self):
+        """pd.DataFrame -> from_pandas() -> same values."""
+        from jaxframe import DataFrame
+
+        pdf = pd.DataFrame(NUMERIC_2COL)
+        jdf = DataFrame.from_pandas(pdf)
+        assert jdf.shape == pdf.shape
+        assert list(jdf.columns) == list(pdf.columns)
+        np.testing.assert_allclose(np.array(jdf.values), pdf.values.astype(np.float32), rtol=1e-5)
+
+    def test_from_pandas_with_nans(self):
+        """NaN values preserved through from_pandas."""
+        from jaxframe import DataFrame
+
+        pdf = pd.DataFrame(WITH_NANS)
+        jdf = DataFrame.from_pandas(pdf)
+        np.testing.assert_array_equal(
+            np.isnan(np.array(jdf.values)),
+            np.isnan(pdf.values.astype(np.float32)),
+        )
+
+    def test_to_numpy(self):
+        """to_numpy() returns plain numpy array."""
+        from jaxframe import DataFrame
+
+        jdf = DataFrame(NUMERIC_2COL)
+        arr = jdf.to_numpy()
+        assert isinstance(arr, np.ndarray)
+        np.testing.assert_allclose(arr, np.array(jdf.values), rtol=1e-5)
+
+    def test_copy_independent(self):
+        """copy() creates an independent DataFrame."""
+        from jaxframe import DataFrame
+
+        jdf = DataFrame(NUMERIC_2COL)
+        jdf2 = jdf.copy()
+        assert jdf.shape == jdf2.shape
+        np.testing.assert_allclose(np.array(jdf.values), np.array(jdf2.values), rtol=1e-5)
+        # Verify they don't share column_order list
+        assert jdf._column_order is not jdf2._column_order

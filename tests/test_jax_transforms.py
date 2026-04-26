@@ -45,6 +45,8 @@ OPERATIONS = [
     ("cumprod_ax1_sum", lambda df: df.cumprod(axis=1).sum(axis=None), True, True),
     ("count_sum", lambda df: df.count().sum(), True, False),
     ("median_sum", lambda df: df.median().sum(), True, False),
+    # Copy (Session 3) — copy then reduce
+    ("copy_sum", lambda df: df.copy().sum(axis=None), True, True),
 ]
 
 

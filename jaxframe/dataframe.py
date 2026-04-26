@@ -912,6 +912,49 @@ class DataFrame:
         )
 
     # ========================================
+    # Pandas interop & copy
+    # ========================================
+
+    def to_pandas(self):
+        """Convert to pandas DataFrame."""
+        import pandas as pd
+
+        data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                dtype, idx = self._column_to_block[col]
+                data[col] = np.asarray(self._dtype_blocks[dtype][:, idx])
+            elif col in self._object_data:
+                data[col] = self._object_data[col]
+        return pd.DataFrame(data, index=np.asarray(self._index))
+
+    @classmethod
+    def from_pandas(cls, pdf):
+        """Create DataFrame from a pandas DataFrame."""
+        import pandas as pd
+
+        data = {col: pdf[col].values.tolist() for col in pdf.columns}
+        index = pdf.index.values if not isinstance(pdf.index, pd.RangeIndex) else None
+        return cls(data, index=index)
+
+    def to_numpy(self):
+        """Return numeric values as a plain numpy array."""
+        return np.asarray(self.values)
+
+    def copy(self):
+        """Return a deep copy of this DataFrame."""
+        new_blocks = {dt: block.copy() for dt, block in self._dtype_blocks.items()}
+        new_col_to_block = dict(self._column_to_block)
+        new_object = {k: list(v) for k, v in self._object_data.items()}
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=new_object,
+            index=self._index.copy(),
+            column_order=list(self._column_order),
+        )
+
+    # ========================================
     # Time series operations
     # ========================================
 

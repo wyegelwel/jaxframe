@@ -112,6 +112,133 @@ def read_csv(path, index_col=None, **kwargs):
     return DataFrame.from_pandas(pdf)
 
 
+# ========================================
+# JAX Compatibility Registry
+# ========================================
+
+# Each entry: (op_name, jit_compatible, grad_compatible, reason_if_not_grad)
+_JAX_COMPAT = [
+    # Arithmetic
+    ("__add__", True, True, None),
+    ("__sub__", True, True, None),
+    ("__mul__", True, True, None),
+    ("__truediv__", True, True, None),
+    ("__floordiv__", True, True, None),
+    ("__mod__", True, True, None),
+    ("__pow__", True, True, None),
+    ("__radd__", True, True, None),
+    ("__rsub__", True, True, None),
+    ("__rmul__", True, True, None),
+    ("__rtruediv__", True, True, None),
+    ("__rfloordiv__", True, True, None),
+    ("__rmod__", True, True, None),
+    ("__rpow__", True, True, None),
+    ("abs", True, True, None),
+    # Reductions
+    ("sum", True, True, None),
+    ("mean", True, True, None),
+    ("std", True, True, None),
+    ("var", True, True, None),
+    ("prod", True, True, None),
+    ("min", True, False, "Non-smooth (gradient undefined at argmin/argmax)"),
+    ("max", True, False, "Non-smooth (gradient undefined at argmin/argmax)"),
+    ("median", True, False, "Non-smooth (sort-based)"),
+    ("count", True, False, "Integer output — not real-valued"),
+    ("all", True, False, "Boolean output — not real-valued"),
+    ("any", True, False, "Boolean output — not real-valued"),
+    # Statistical
+    ("skew", True, True, None),
+    ("kurt", True, True, None),
+    ("sem", True, True, None),
+    # Transforms
+    ("cumsum", True, True, None),
+    ("cumprod", True, True, None),
+    ("shift", True, True, None),
+    ("where", True, True, None),
+    ("clip", True, True, None),
+    ("fillna", True, True, None),
+    ("apply", True, True, None),
+    ("copy", True, True, None),
+    ("astype", True, False, "Discrete type conversion"),
+    # Boolean / discrete
+    ("isna", True, False, "Boolean output — not real-valued"),
+    ("notna", True, False, "Boolean output — not real-valued"),
+    ("isin", True, False, "Boolean output — not real-valued"),
+    ("round", True, False, "Step function — gradient zero almost everywhere"),
+    ("idxmin", True, False, "Discrete (argmin) — not differentiable"),
+    ("idxmax", True, False, "Discrete (argmax) — not differentiable"),
+    ("sort_values", True, False, "Permutation-based (argsort) — discrete"),
+    ("nlargest", True, False, "Permutation-based (argsort) — discrete"),
+    ("nsmallest", True, False, "Permutation-based (argsort) — discrete"),
+    ("quantile", True, False, "Non-smooth (sort-based)"),
+    # Column ops
+    ("drop", True, True, None),
+    ("rename", True, True, None),
+    # Rolling (fixed-size)
+    ("rolling.sum", True, True, None),
+    ("rolling.mean", True, True, None),
+    ("rolling.std", True, True, None),
+    ("rolling.var", True, True, None),
+    ("rolling.min", True, False, "Non-smooth"),
+    ("rolling.max", True, False, "Non-smooth"),
+    # GroupBy (segment ops)
+    ("groupby.sum", True, True, None),
+    ("groupby.mean", True, True, None),
+    ("groupby.std", True, True, None),
+    ("groupby.var", True, True, None),
+    ("groupby.transform", True, True, None),
+    ("groupby.min", True, False, "Non-smooth"),
+    ("groupby.max", True, False, "Non-smooth"),
+    ("groupby.count", True, False, "Integer output"),
+    ("groupby.prod", True, False, "JAX scatter_mul grad unimplemented"),
+    ("groupby.first", True, False, "Discrete (index-based gather)"),
+    ("groupby.last", True, False, "Discrete (index-based gather)"),
+    # Eager-only (not JIT-compatible)
+    ("describe", False, False, "Returns pandas DataFrame"),
+    ("to_pandas", False, False, "I/O — outside JAX"),
+    ("from_pandas", False, False, "I/O — outside JAX"),
+    ("to_csv", False, False, "I/O — outside JAX"),
+    ("to_numpy", False, False, "Converts to numpy"),
+    ("nunique", False, False, "Uses np.unique (eager)"),
+    ("mode", False, False, "Uses np.unique (eager)"),
+    ("value_counts", False, False, "Uses np.unique (eager)"),
+    ("rolling(str)", False, False, "Time-based: variable window sizes"),
+]
+
+
+def jax_info(op_name=None):
+    """Query JAX compatibility for jaxframe operations.
+
+    Args:
+        op_name: Optional operation name to query. If None, prints all.
+
+    Returns:
+        If op_name given: dict with 'jit', 'grad', 'reason' keys.
+        If None: prints a formatted compatibility table.
+
+    Examples:
+        >>> jaxframe.jax_info("sum")
+        {'jit': True, 'grad': True, 'reason': None}
+        >>> jaxframe.jax_info("min")
+        {'jit': True, 'grad': False, 'reason': 'Non-smooth ...'}
+        >>> jaxframe.jax_info()  # prints full table
+    """
+    if op_name is not None:
+        for name, jit_ok, grad_ok, reason in _JAX_COMPAT:
+            if name == op_name:
+                return {"jit": jit_ok, "grad": grad_ok, "reason": reason}
+        return None
+
+    # Print full table
+    print(f"{'Operation':<25} {'JIT':>5} {'Grad':>5}  Reason")
+    print("-" * 70)
+    for name, jit_ok, grad_ok, reason in _JAX_COMPAT:
+        jit_str = "Yes" if jit_ok else "No"
+        grad_str = "Yes" if grad_ok else "No"
+        reason_str = reason or ""
+        print(f"{name:<25} {jit_str:>5} {grad_str:>5}  {reason_str}")
+
+
 @dataclass
 class DataFrame:
     """

@@ -1312,6 +1312,40 @@ class TestTypeOps:
 
 
 # ============================
+# JAX compat info API
+# ============================
+
+
+def test_jax_info_query():
+    from jaxframe import jax_info
+
+    result = jax_info("sum")
+    assert result["jit"] is True
+    assert result["grad"] is True
+    assert result["reason"] is None
+
+    result = jax_info("min")
+    assert result["jit"] is True
+    assert result["grad"] is False
+    assert "Non-smooth" in result["reason"]
+
+    result = jax_info("to_csv")
+    assert result["jit"] is False
+
+    assert jax_info("nonexistent_op") is None
+
+
+def test_jax_info_table(capsys):
+    from jaxframe import jax_info
+
+    jax_info()  # prints table
+    captured = capsys.readouterr()
+    assert "Operation" in captured.out
+    assert "sum" in captured.out
+    assert "min" in captured.out
+
+
+# ============================
 # Session 20: I/O — to_csv, read_csv
 # ============================
 

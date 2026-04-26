@@ -1194,6 +1194,24 @@ class DataFrame:
             val_cols=val_cols,
         )
 
+    def rolling(self, window, min_periods: int | None = None, on: str | None = None):
+        """Return a Rolling object for rolling window calculations.
+
+        Args:
+            window: int for fixed-size window (JIT-compatible),
+                    or str like '7D' for time-based window (not JIT-compatible)
+            min_periods: minimum number of valid observations
+            on: column to use for time-based windows (must be datetime64)
+
+        Fixed-size windows are JIT-compatible.
+        Time-based windows are NOT JIT-compatible (variable window sizes).
+        """
+        if isinstance(window, str):
+            return TimeRolling(self, window=window, on=on)
+        if min_periods is None:
+            min_periods = window
+        return Rolling(self, window=window, min_periods=min_periods)
+
     # ========================================
     # Pandas interop & copy
     # ========================================
@@ -2239,6 +2257,177 @@ class _StringAccessor:
 
     def split(self, sep=None):
         return [s.split(sep) for s in self._data]
+
+
+# ========================================
+# Rolling
+# ========================================
+
+
+def _rolling_window(x, window):
+    """Create rolling windows over axis 0 of a 2D array. JIT-compatible.
+
+    Returns array of shape (n_rows, n_cols, window) via gather.
+    """
+    n = x.shape[0]
+    # indices[i] = [i-window+1, ..., i] clipped to [0, n-1]
+    idx = jnp.arange(n)[:, None] - jnp.arange(window - 1, -1, -1)[None, :]
+    idx = jnp.clip(idx, 0, n - 1)
+    # Mask: positions where idx < 0 before clipping (not enough history)
+    valid = jnp.arange(n)[:, None] - jnp.arange(window - 1, -1, -1)[None, :] >= 0
+    return idx, valid
+
+
+class Rolling:
+    """Rolling window operations. JIT-compatible with fixed window size."""
+
+    def __init__(self, df, window: int, min_periods: int):
+        self._df = df
+        self._window = window
+        self._min_periods = min_periods
+
+    def _apply(self, fn):
+        """Apply rolling fn to each dtype block. Returns DataFrame."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            idx, valid = _rolling_window(block, self._window)
+            # Gather: (n_rows, window, n_cols) then apply fn
+            # block[idx] shape: (n_rows, window, n_cols)
+            gathered = block[idx]  # (n_rows, n_cols, window) via advanced idx
+            # Mask invalid positions with NaN
+            mask = valid[:, :, None]  # (n_rows, window, 1)
+            gathered = jnp.where(mask, gathered, jnp.nan)
+            # Count valid per window
+            n_valid = jnp.sum(valid, axis=1)  # (n_rows,)
+            result = fn(gathered, n_valid)  # (n_rows, n_cols)
+            # NaN where fewer than min_periods valid values
+            result = jnp.where(n_valid[:, None] >= self._min_periods, result, jnp.nan)
+            new_blocks[result.dtype] = result
+
+        new_col_to_block = {}
+        for col, (old_dtype, col_idx) in self._df._column_to_block.items():
+            new_dtype = new_blocks[
+                next(
+                    nd
+                    for od, nd in zip(self._df._dtype_blocks.keys(), new_blocks.keys())
+                    if od == old_dtype
+                )
+            ].dtype
+            new_col_to_block[col] = (new_dtype, col_idx)
+
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
+
+    def sum(self):
+        """Rolling sum."""
+        return self._apply(lambda g, nv: jnp.nansum(g, axis=1))
+
+    def mean(self):
+        """Rolling mean."""
+        return self._apply(lambda g, nv: jnp.nanmean(g, axis=1))
+
+    def var(self, ddof: int = 1):
+        """Rolling variance."""
+        return self._apply(lambda g, nv: jnp.nanvar(g, axis=1, ddof=ddof))
+
+    def std(self, ddof: int = 1):
+        """Rolling standard deviation."""
+        return self._apply(lambda g, nv: jnp.nanstd(g, axis=1, ddof=ddof))
+
+    def min(self):
+        """Rolling minimum."""
+        return self._apply(lambda g, nv: jnp.nanmin(g, axis=1))
+
+    def max(self):
+        """Rolling maximum."""
+        return self._apply(lambda g, nv: jnp.nanmax(g, axis=1))
+
+
+_TIME_UNITS = {
+    "s": "s",
+    "T": "m",
+    "min": "m",
+    "H": "h",
+    "h": "h",
+    "D": "D",
+    "W": "W",
+}
+
+
+def _parse_time_window(window: str):
+    """Parse pandas-style offset string to numpy timedelta64."""
+    # Extract number and unit: '7D' -> (7, 'D'), '2H' -> (2, 'H')
+    i = 0
+    while i < len(window) and (window[i].isdigit() or window[i] == "."):
+        i += 1
+    num = int(window[:i]) if i > 0 else 1
+    unit = window[i:]
+    np_unit = _TIME_UNITS.get(unit, unit)
+    return np.timedelta64(num, np_unit)
+
+
+class TimeRolling:
+    """Time-based rolling windows. NOT JIT-compatible (variable window sizes)."""
+
+    def __init__(self, df, window: str, on: str | None = None):
+        self._df = df
+        self._delta = _parse_time_window(window)
+        # Get timestamps
+        if on is not None:
+            self._times = np.asarray(df._object_data.get(on, df[on].values))
+        else:
+            self._times = np.asarray(df._index)
+        if not np.issubdtype(self._times.dtype, np.datetime64):
+            raise ValueError("Time-based rolling requires datetime index or 'on' column")
+        # Pre-compute window boundaries (eager)
+        # Pandas uses (t - delta, t] window (open left, closed right)
+        self._starts = np.searchsorted(self._times, self._times - self._delta, side="right")
+
+    def _apply_np(self, fn):
+        """Apply fn per-row using variable-size windows. Returns DataFrame."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            data = np.asarray(block)
+            n_rows, n_cols = data.shape
+            result = np.empty_like(data, dtype=np.float64)
+            for i in range(n_rows):
+                window_data = data[self._starts[i] : i + 1]
+                result[i] = fn(window_data, axis=0)
+            new_blocks[jnp.float32] = jnp.asarray(result, dtype=jnp.float32)
+
+        new_col_to_block = {
+            col: (jnp.float32, idx) for col, (_, idx) in self._df._column_to_block.items()
+        }
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
+
+    def sum(self):
+        return self._apply_np(np.nansum)
+
+    def mean(self):
+        return self._apply_np(np.nanmean)
+
+    def var(self, ddof=1):
+        return self._apply_np(lambda d, axis: np.nanvar(d, axis=axis, ddof=ddof))
+
+    def std(self, ddof=1):
+        return self._apply_np(lambda d, axis: np.nanstd(d, axis=axis, ddof=ddof))
+
+    def min(self):
+        return self._apply_np(np.nanmin)
+
+    def max(self):
+        return self._apply_np(np.nanmax)
 
 
 # ========================================

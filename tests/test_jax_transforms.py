@@ -68,7 +68,12 @@ OPERATIONS = [
     ("round_sum", lambda df: df.round(1).sum(axis=None), True, False),
     ("idxmin_sum", lambda df: df.idxmin(axis=0).values.sum(), True, False),  # discrete (argmin)
     ("idxmax_sum", lambda df: df.idxmax(axis=0).values.sum(), True, False),  # discrete (argmax)
-    ("isin_sum", lambda df: df.isin([1.0, 4.0]).sum(axis=None), True, False),  # boolean output
+    ("isin_sum", lambda df: df.isin([1.0, 4.0]).sum(axis=None), True, False),
+    # Session 16: Rolling windows (fixed-size, JIT-compatible)
+    ("roll_sum", lambda df: df.rolling(2).sum().sum(axis=None), True, True),
+    ("roll_mean", lambda df: df.rolling(2).mean().sum(axis=None), True, True),
+    ("roll_min", lambda df: df.rolling(2).min().sum(axis=None), True, False),
+    ("roll_max", lambda df: df.rolling(2).max().sum(axis=None), True, False),
 ]
 
 # GroupBy JAX compat — segment ops are JIT+grad compatible

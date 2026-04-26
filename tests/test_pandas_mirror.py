@@ -1019,3 +1019,79 @@ ISIN_CASES = [
 @pytest.mark.parametrize("name,data,op", ISIN_CASES, ids=[c[0] for c in ISIN_CASES])
 def test_isin(name, data, op):
     run_equiv(data, op)
+
+
+# ============================
+# Session 16: Rolling window ops
+# ============================
+
+ROLLING_DATA = {
+    "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "b": [10.0, 20.0, 30.0, 40.0, 50.0],
+}
+
+ROLLING_CASES = [
+    ("roll_sum_3", ROLLING_DATA, lambda df: df.rolling(3).sum()),
+    ("roll_mean_3", ROLLING_DATA, lambda df: df.rolling(3).mean()),
+    ("roll_std_3", ROLLING_DATA, lambda df: df.rolling(3).std()),
+    ("roll_var_3", ROLLING_DATA, lambda df: df.rolling(3).var()),
+    ("roll_min_3", ROLLING_DATA, lambda df: df.rolling(3).min()),
+    ("roll_max_3", ROLLING_DATA, lambda df: df.rolling(3).max()),
+    ("roll_sum_2", ROLLING_DATA, lambda df: df.rolling(2).sum()),
+    ("roll_mean_2", ROLLING_DATA, lambda df: df.rolling(2).mean()),
+]
+
+
+@pytest.mark.parametrize("name,data,op", ROLLING_CASES, ids=[c[0] for c in ROLLING_CASES])
+def test_rolling(name, data, op):
+    run_equiv(data, op)
+
+
+class TestTimeRolling:
+    """Time-based rolling windows (not JIT-compatible)."""
+
+    def _make_data(self):
+        dates = pd.date_range("2024-01-01", periods=5, freq="D")
+        return dates, {"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [10.0, 20.0, 30.0, 40.0, 50.0]}
+
+    def test_time_rolling_sum(self):
+        from jaxframe import DataFrame
+
+        dates, data = self._make_data()
+        pdf = pd.DataFrame(data, index=dates)
+        jdf = DataFrame(data, index=dates.values)
+        pd_result = pdf.rolling("3D").sum()
+        jf_result = jdf.rolling("3D").sum()
+        np.testing.assert_allclose(
+            np.asarray(jf_result.values),
+            pd_result.values.astype(np.float32),
+            rtol=1e-5,
+        )
+
+    def test_time_rolling_mean(self):
+        from jaxframe import DataFrame
+
+        dates, data = self._make_data()
+        pdf = pd.DataFrame(data, index=dates)
+        jdf = DataFrame(data, index=dates.values)
+        pd_result = pdf.rolling("2D").mean()
+        jf_result = jdf.rolling("2D").mean()
+        np.testing.assert_allclose(
+            np.asarray(jf_result.values),
+            pd_result.values.astype(np.float32),
+            rtol=1e-5,
+        )
+
+    def test_time_rolling_std(self):
+        from jaxframe import DataFrame
+
+        dates, data = self._make_data()
+        pdf = pd.DataFrame(data, index=dates)
+        jdf = DataFrame(data, index=dates.values)
+        pd_result = pdf.rolling("3D").std()
+        jf_result = jdf.rolling("3D").std()
+        np.testing.assert_allclose(
+            np.asarray(jf_result.values),
+            pd_result.values.astype(np.float32),
+            rtol=1e-4,
+        )

@@ -729,6 +729,60 @@ class DataFrame:
         """Absolute value (JIT-compatible). Gradient is non-smooth at zero."""
         return self._apply_blockwise(jnp.abs)
 
+    def _apply_cross_column(self, fn):
+        """Apply fn across all numeric columns (axis=1 ops). JIT-compatible."""
+        data = self.values  # (n_rows, n_numeric_cols)
+        result = fn(data)
+        cols = self._numeric_cols
+        new_dtype = result.dtype
+        new_blocks = {new_dtype: result}
+        new_col_to_block = {col: (new_dtype, i) for i, col in enumerate(cols)}
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._object_data,
+            index=self._index,
+            column_order=self._column_order,
+        )
+
+    def cumsum(self, axis: int = 0):
+        """Cumulative sum along axis (JIT-compatible, differentiable)."""
+        if axis == 0:
+            return self._apply_blockwise(lambda b: jnp.cumsum(b, axis=0))
+        elif axis == 1:
+            return self._apply_cross_column(lambda d: jnp.cumsum(d, axis=1))
+        else:
+            raise ValueError(f"axis must be 0 or 1, got {axis}")
+
+    def cumprod(self, axis: int = 0):
+        """Cumulative product along axis (JIT-compatible, differentiable)."""
+        if axis == 0:
+            return self._apply_blockwise(lambda b: jnp.cumprod(b, axis=0))
+        elif axis == 1:
+            return self._apply_cross_column(lambda d: jnp.cumprod(d, axis=1))
+        else:
+            raise ValueError(f"axis must be 0 or 1, got {axis}")
+
+    def count(self, axis: int = 0):
+        """Count non-NaN values along axis (JIT-compatible)."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns to count")
+        result = jnp.sum(~jnp.isnan(self._numeric_data), axis=axis)
+        if axis == 0:
+            return Series(result, index=np.array(self._numeric_cols), name="count")
+        else:
+            return Series(result, index=self._index, name="count")
+
+    def median(self, axis: int = 0):
+        """Median along axis (JIT-compatible). Gradient is non-smooth."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns to compute median")
+        result = jnp.nanmedian(self._numeric_data, axis=axis)
+        if axis == 0:
+            return Series(result, index=np.array(self._numeric_cols), name="median")
+        else:
+            return Series(result, index=self._index, name="median")
+
     def _apply_blockwise(self, fn):
         """Apply fn to each dtype block, return new DataFrame via _from_parts."""
         new_blocks = {dtype: fn(block) for dtype, block in self._dtype_blocks.items()}

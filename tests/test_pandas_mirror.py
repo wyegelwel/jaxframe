@@ -172,6 +172,36 @@ def test_missing_data(name, data, op):
 
 
 # ============================
+# Cumulative & descriptive (Session 2)
+# ============================
+
+CUMULATIVE_CASES = [
+    ("cumsum_axis0", NUMERIC_2COL, lambda df: df.cumsum()),
+    ("cumsum_axis1", NUMERIC_3COL, lambda df: df.cumsum(axis=1)),
+    ("cumprod_axis0", NUMERIC_2COL, lambda df: df.cumprod()),
+    ("cumprod_axis1", NUMERIC_3COL, lambda df: df.cumprod(axis=1)),
+]
+
+
+@pytest.mark.parametrize("name,data,op", CUMULATIVE_CASES, ids=[c[0] for c in CUMULATIVE_CASES])
+def test_cumulative(name, data, op):
+    run_equiv(data, op)
+
+
+DESCRIPTIVE_CASES = [
+    ("count_axis0", NUMERIC_2COL, lambda df: df.count()),
+    ("count_with_nans", WITH_NANS, lambda df: df.count()),
+    ("median_axis0", NUMERIC_3COL, lambda df: df.median()),
+    ("median_axis1", NUMERIC_3COL, lambda df: df.median(axis=1)),
+]
+
+
+@pytest.mark.parametrize("name,data,op", DESCRIPTIVE_CASES, ids=[c[0] for c in DESCRIPTIVE_CASES])
+def test_descriptive(name, data, op):
+    run_equiv(data, op)
+
+
+# ============================
 # Series operators (Session 1)
 # ============================
 

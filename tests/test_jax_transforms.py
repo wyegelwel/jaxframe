@@ -38,6 +38,13 @@ OPERATIONS = [
     ("fillna_sum", lambda df: df.fillna(0.0).sum(axis=None), True, True),
     ("isna_sum", lambda df: df.isna().sum(axis=None), True, False),
     ("notna_sum", lambda df: df.notna().sum(axis=None), True, False),
+    # Cumulative & descriptive (Session 2)
+    ("cumsum_sum", lambda df: df.cumsum().sum(axis=None), True, True),
+    ("cumprod_sum", lambda df: df.cumprod().sum(axis=None), True, True),
+    ("cumsum_ax1_sum", lambda df: df.cumsum(axis=1).sum(axis=None), True, True),
+    ("cumprod_ax1_sum", lambda df: df.cumprod(axis=1).sum(axis=None), True, True),
+    ("count_sum", lambda df: df.count().sum(), True, False),
+    ("median_sum", lambda df: df.median().sum(), True, False),
 ]
 
 

@@ -5,13 +5,18 @@ Each test runs the same lambda on both pd.DataFrame and jaxframe.DataFrame,
 then compares results. Adding a new test = adding a tuple to a list.
 """
 
+import numpy as np
+import pandas as pd
 import pytest
 from conftest import (
     NUMERIC_2COL,
     NUMERIC_3COL,
+    WITH_NANS,
     WITH_NEGATIVES,
     run_equiv,
 )
+
+from jaxframe import Series
 
 # ============================
 # Arithmetic
@@ -143,3 +148,132 @@ STAT_CASES = [
 @pytest.mark.parametrize("name,data,op", STAT_CASES, ids=[c[0] for c in STAT_CASES])
 def test_statistical(name, data, op):
     run_equiv(data, op)
+
+
+# ============================
+# Missing data (Session 1)
+# ============================
+
+MISSING_DATA_CASES = [
+    ("isna", WITH_NANS, lambda df: df.isna()),
+    ("isnull", WITH_NANS, lambda df: df.isnull()),
+    ("notna", WITH_NANS, lambda df: df.notna()),
+    ("notnull", WITH_NANS, lambda df: df.notnull()),
+    ("fillna_scalar", WITH_NANS, lambda df: df.fillna(0.0)),
+    ("fillna_neg1", WITH_NANS, lambda df: df.fillna(-1.0)),
+    ("isna_no_nans", NUMERIC_2COL, lambda df: df.isna()),
+    ("fillna_no_nans", NUMERIC_2COL, lambda df: df.fillna(0.0)),
+]
+
+
+@pytest.mark.parametrize("name,data,op", MISSING_DATA_CASES, ids=[c[0] for c in MISSING_DATA_CASES])
+def test_missing_data(name, data, op):
+    run_equiv(data, op)
+
+
+# ============================
+# Series operators (Session 1)
+# ============================
+
+
+class TestSeriesArithmetic:
+    """Test that Series arithmetic matches pandas Series."""
+
+    def _compare(self, pd_series, jf_series, rtol=1e-5):
+        np.testing.assert_allclose(
+            np.asarray(jf_series.values),
+            pd_series.values.astype(np.float32),
+            rtol=rtol,
+        )
+
+    def test_add_scalar(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        self._compare(ps + 10, js + 10)
+
+    def test_sub_scalar(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        self._compare(ps - 1, js - 1)
+
+    def test_mul_scalar(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        self._compare(ps * 3, js * 3)
+
+    def test_truediv_scalar(self):
+        ps = pd.Series([10.0, 20.0, 30.0])
+        js = Series([10.0, 20.0, 30.0])
+        self._compare(ps / 5, js / 5)
+
+    def test_floordiv_scalar(self):
+        ps = pd.Series([10.0, 21.0, 35.0])
+        js = Series([10.0, 21.0, 35.0])
+        self._compare(ps // 7, js // 7)
+
+    def test_mod_scalar(self):
+        ps = pd.Series([10.0, 21.0, 35.0])
+        js = Series([10.0, 21.0, 35.0])
+        self._compare(ps % 7, js % 7)
+
+    def test_pow_scalar(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        self._compare(ps**2, js**2)
+
+    def test_neg(self):
+        ps = pd.Series([1.0, -2.0, 3.0])
+        js = Series([1.0, -2.0, 3.0])
+        self._compare(-ps, -js)
+
+    def test_add_series(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        self._compare(ps + ps, js + js)
+
+    def test_gt(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        pd_result = ps > 2
+        jf_result = js > 2
+        np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values)
+
+    def test_lt(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        pd_result = ps < 2
+        jf_result = js < 2
+        np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values)
+
+    def test_ge(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        pd_result = ps >= 2
+        jf_result = js >= 2
+        np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values)
+
+    def test_le(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        pd_result = ps <= 2
+        jf_result = js <= 2
+        np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values)
+
+    def test_eq(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        pd_result = ps == 2
+        jf_result = js == 2
+        np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values)
+
+    def test_ne(self):
+        ps = pd.Series([1.0, 2.0, 3.0])
+        js = Series([1.0, 2.0, 3.0])
+        pd_result = ps != 2
+        jf_result = js != 2
+        np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values)
+
+    def test_abs(self):
+        ps = pd.Series([-1.0, 2.0, -3.0])
+        js = Series([-1.0, 2.0, -3.0])
+        self._compare(ps.abs(), js.abs())

@@ -32,9 +32,12 @@ OPERATIONS = [
     ("chain", lambda df: ((df + 1) * 2 - 3).sum(axis=None), True, True),
     # Where / clip
     ("where_sum", lambda df: df.where(df > 3, 0).sum(axis=None), True, True),
-    # clip/shift reconstruct via __init__ which calls np.asarray on traced values — known bug
-    ("clip_sum", lambda df: df.clip(2, 5).sum(axis=None), False, False),
-    ("shift_sum", lambda df: df.shift(1, fill_value=0).sum(axis=None), False, False),
+    ("clip_sum", lambda df: df.clip(2, 5).sum(axis=None), True, True),
+    ("shift_sum", lambda df: df.shift(1, fill_value=0).sum(axis=None), True, True),
+    # Missing data ops (Session 1)
+    ("fillna_sum", lambda df: df.fillna(0.0).sum(axis=None), True, True),
+    ("isna_sum", lambda df: df.isna().sum(axis=None), True, False),
+    ("notna_sum", lambda df: df.notna().sum(axis=None), True, False),
 ]
 
 

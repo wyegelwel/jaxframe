@@ -9,15 +9,14 @@ This module implements a DataFrame class that:
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
-import warnings
+from typing import Any, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 
-def concat(dataframes: List['DataFrame'], axis: int = 0):
+def concat(dataframes: list["DataFrame"], axis: int = 0):
     """
     Concatenate DataFrames along an axis (JIT-compatible with dtype preservation).
 
@@ -83,21 +82,19 @@ def concat(dataframes: List['DataFrame'], axis: int = 0):
                     dtype, idx = df._column_to_block[col]
                     all_col_data[col] = (df._dtype_blocks[dtype][:, idx], dtype)
                 elif col in df._object_data:
-                    all_col_data[col] = (df._object_data[col], 'object')
+                    all_col_data[col] = (df._object_data[col], "object")
 
         # Build new DataFrame from collected columns
         numeric_data = {}
         object_data = {}
         for col, (data, dtype) in all_col_data.items():
-            if dtype == 'object':
+            if dtype == "object":
                 object_data[col] = data
             else:
                 numeric_data[col] = data
 
         # Column order
-        new_column_order = tuple(
-            col for df in dataframes for col in df._column_order
-        )
+        tuple(col for df in dataframes for col in df._column_order)
 
         # Create via dict init to properly group by dtype
         result_dict = {**numeric_data, **object_data}
@@ -123,13 +120,13 @@ class DataFrame:
         _column_order: Original column order (for preserving user's column order)
     """
 
-    _dtype_blocks: Dict[np.dtype, jnp.ndarray]
-    _column_to_block: Dict[str, Tuple[np.dtype, int]]
-    _object_data: Dict[str, np.ndarray]
+    _dtype_blocks: dict[np.dtype, jnp.ndarray]
+    _column_to_block: dict[str, tuple[np.dtype, int]]
+    _object_data: dict[str, np.ndarray]
     _index: np.ndarray
-    _column_order: Tuple[str, ...]
+    _column_order: tuple[str, ...]
 
-    def __init__(self, data: Union[Dict[str, Any], np.ndarray, jnp.ndarray], index=None):
+    def __init__(self, data: dict[str, Any] | np.ndarray | jnp.ndarray, index=None):
         """
         Create a DataFrame from a dictionary of columns or array.
 
@@ -148,7 +145,7 @@ class DataFrame:
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
 
-    def _init_from_dict(self, data: Dict[str, Any], index=None):
+    def _init_from_dict(self, data: dict[str, Any], index=None):
         """Initialize from dictionary of columns using dtype blocks."""
         if not data:
             # Empty DataFrame
@@ -161,7 +158,7 @@ class DataFrame:
 
         # Determine number of rows
         first_col = next(iter(data.values()))
-        n_rows = len(first_col) if hasattr(first_col, '__len__') else 1
+        n_rows = len(first_col) if hasattr(first_col, "__len__") else 1
 
         # Set index
         if index is None:
@@ -222,7 +219,7 @@ class DataFrame:
         # Store object columns
         self._object_data = object_cols_dict
 
-    def _init_from_array(self, data: Union[np.ndarray, jnp.ndarray], index=None):
+    def _init_from_array(self, data: np.ndarray | jnp.ndarray, index=None):
         """Initialize from 2D array (all numeric) using dtype blocks."""
         arr = jnp.asarray(data)
         if arr.ndim != 2:
@@ -251,7 +248,7 @@ class DataFrame:
             self._index = np.asarray(index)
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> tuple[int, int]:
         """Return (n_rows, n_cols)."""
         n_rows = len(self._index)
         n_cols = len(self._column_order)
@@ -262,7 +259,7 @@ class DataFrame:
         return len(self._index)
 
     @property
-    def columns(self) -> List[str]:
+    def columns(self) -> list[str]:
         """Return list of column names."""
         return list(self._column_order)
 
@@ -292,7 +289,7 @@ class DataFrame:
         return 2
 
     @property
-    def dtypes(self) -> Dict[str, Any]:
+    def dtypes(self) -> dict[str, Any]:
         """Return dictionary mapping column names to dtypes."""
         dtypes_dict = {}
         # Add numeric/boolean columns from dtype blocks
@@ -333,7 +330,7 @@ class DataFrame:
         for col in numeric_cols:
             dtype, idx = self._column_to_block[col]
             block = self._dtype_blocks[dtype]
-            col_data = block[:, idx:idx+1]  # Keep 2D shape
+            col_data = block[:, idx : idx + 1]  # Keep 2D shape
             columns.append(col_data.astype(promoted_dtype))
 
         return jnp.concatenate(columns, axis=1)
@@ -345,19 +342,19 @@ class DataFrame:
 
     # Backward compatibility properties for tests
     @property
-    def _numeric_cols(self) -> Tuple[str, ...]:
+    def _numeric_cols(self) -> tuple[str, ...]:
         """Get list of numeric column names (backward compatibility)."""
         return tuple(col for col in self._column_order if col in self._column_to_block)
 
     @property
-    def _numeric_data(self) -> Optional[jnp.ndarray]:
+    def _numeric_data(self) -> jnp.ndarray | None:
         """Get numeric data as single array (backward compatibility)."""
         if not self._dtype_blocks:
             return None
         return self.values
 
     @property
-    def _numeric_dtypes(self) -> Tuple[Any, ...]:
+    def _numeric_dtypes(self) -> tuple[Any, ...]:
         """Get numeric column dtypes (backward compatibility)."""
         return tuple(self._column_to_block[col][0] for col in self._numeric_cols)
 
@@ -388,8 +385,7 @@ class DataFrame:
 
         # Transfer all dtype blocks to device
         new_dtype_blocks = {
-            dtype: jax.device_put(block, device)
-            for dtype, block in self._dtype_blocks.items()
+            dtype: jax.device_put(block, device) for dtype, block in self._dtype_blocks.items()
         }
 
         return DataFrame._from_parts(
@@ -415,7 +411,7 @@ class DataFrame:
             >>> df_gpu = df.to_gpu(1)     # GPU 1
         """
         try:
-            gpu_devices = jax.devices('gpu')
+            gpu_devices = jax.devices("gpu")
             if id >= len(gpu_devices):
                 raise ValueError(f"GPU {id} not found. Available GPUs: {len(gpu_devices)}")
             return self.to_device(gpu_devices[id])
@@ -432,7 +428,7 @@ class DataFrame:
         Examples:
             >>> df_cpu = df.to_cpu()
         """
-        cpu_device = jax.devices('cpu')[0]
+        cpu_device = jax.devices("cpu")[0]
         return self.to_device(cpu_device)
 
     def to_tpu(self, id: int = 0):
@@ -450,14 +446,14 @@ class DataFrame:
             >>> df_tpu = df.to_tpu(1)     # TPU 1
         """
         try:
-            tpu_devices = jax.devices('tpu')
+            tpu_devices = jax.devices("tpu")
             if id >= len(tpu_devices):
                 raise ValueError(f"TPU {id} not found. Available TPUs: {len(tpu_devices)}")
             return self.to_device(tpu_devices[id])
         except RuntimeError:
             raise RuntimeError("No TPU devices available")
 
-    def __getitem__(self, key: Union[str, List[str]]):
+    def __getitem__(self, key: str | list[str]):
         """
         Get column(s) by name.
 
@@ -518,9 +514,9 @@ class DataFrame:
                         val = self._numeric_data[i, col_idx]
                         # Handle both scalars and arrays
                         try:
-                            if hasattr(val, 'shape') and val.shape:
+                            if hasattr(val, "shape") and val.shape:
                                 # Multi-dimensional value, show shape instead
-                                row_data.append(f"{'Array'+ str(val.shape):>10}")
+                                row_data.append(f"{'Array' + str(val.shape):>10}")
                             else:
                                 row_data.append(f"{float(val):>10.2f}")
                         except (TypeError, ValueError):
@@ -539,35 +535,35 @@ class DataFrame:
     # Numeric operations (JAX-compatible)
     # ========================================
 
-    def __mul__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
+    def __mul__(self, other: Union[float, "DataFrame"]) -> "DataFrame":
         """Element-wise multiplication (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.multiply, "multiplication")
 
-    def __add__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
+    def __add__(self, other: Union[float, "DataFrame"]) -> "DataFrame":
         """Element-wise addition (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.add, "addition")
 
-    def __sub__(self, other: Union[float, 'DataFrame', 'Series']) -> 'DataFrame':
+    def __sub__(self, other: Union[float, "DataFrame", "Series"]) -> "DataFrame":
         """Element-wise subtraction (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.subtract, "subtraction")
 
-    def __truediv__(self, other: Union[float, 'DataFrame', 'Series']) -> 'DataFrame':
+    def __truediv__(self, other: Union[float, "DataFrame", "Series"]) -> "DataFrame":
         """Element-wise division (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.true_divide, "division")
 
-    def __floordiv__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
+    def __floordiv__(self, other: Union[float, "DataFrame"]) -> "DataFrame":
         """Element-wise floor division (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.floor_divide, "floor division")
 
-    def __mod__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
+    def __mod__(self, other: Union[float, "DataFrame"]) -> "DataFrame":
         """Element-wise modulo (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.mod, "modulo")
 
-    def __pow__(self, other: Union[float, 'DataFrame']) -> 'DataFrame':
+    def __pow__(self, other: Union[float, "DataFrame"]) -> "DataFrame":
         """Element-wise power (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.power, "power")
 
-    def __matmul__(self, other: Union[jnp.ndarray, 'DataFrame']) -> Union[jnp.ndarray, 'DataFrame']:
+    def __matmul__(self, other: Union[jnp.ndarray, "DataFrame"]) -> Union[jnp.ndarray, "DataFrame"]:
         """Matrix multiplication (JIT-compatible with type promotion)."""
         if not self._dtype_blocks:
             raise ValueError("No numeric columns for matrix multiplication")
@@ -582,7 +578,7 @@ class DataFrame:
             # Handle JAX arrays
             return self.values @ other
 
-    def sum(self, axis: Optional[int] = 0):
+    def sum(self, axis: int | None = 0):
         """
         Sum along axis (JIT-compatible).
 
@@ -601,15 +597,15 @@ class DataFrame:
 
         if axis == 0:
             # Column-wise sum -> Series
-            return Series(result, index=np.array(self._numeric_cols), name='sum')
+            return Series(result, index=np.array(self._numeric_cols), name="sum")
         elif axis == 1:
             # Row-wise sum -> Series
-            return Series(result, index=self._index, name='sum')
+            return Series(result, index=self._index, name="sum")
         else:
             # Total sum -> scalar
             return result
 
-    def mean(self, axis: Optional[int] = 0):
+    def mean(self, axis: int | None = 0):
         """
         Mean along axis (JIT-compatible).
 
@@ -621,13 +617,13 @@ class DataFrame:
         result = jnp.nanmean(self._numeric_data, axis=axis)
 
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name='mean')
+            return Series(result, index=np.array(self._numeric_cols), name="mean")
         elif axis == 1:
-            return Series(result, index=self._index, name='mean')
+            return Series(result, index=self._index, name="mean")
         else:
             return result
 
-    def std(self, axis: Optional[int] = 0, ddof: int = 1):
+    def std(self, axis: int | None = 0, ddof: int = 1):
         """
         Standard deviation along axis (JIT-compatible, differentiable).
 
@@ -643,13 +639,13 @@ class DataFrame:
         result = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
 
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name='std')
+            return Series(result, index=np.array(self._numeric_cols), name="std")
         elif axis == 1:
-            return Series(result, index=self._index, name='std')
+            return Series(result, index=self._index, name="std")
         else:
             return result
 
-    def var(self, axis: Optional[int] = 0, ddof: int = 1):
+    def var(self, axis: int | None = 0, ddof: int = 1):
         """
         Variance along axis (JIT-compatible, differentiable).
 
@@ -665,13 +661,13 @@ class DataFrame:
         result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
 
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name='var')
+            return Series(result, index=np.array(self._numeric_cols), name="var")
         elif axis == 1:
-            return Series(result, index=self._index, name='var')
+            return Series(result, index=self._index, name="var")
         else:
             return result
 
-    def min(self, axis: Optional[int] = 0):
+    def min(self, axis: int | None = 0):
         """
         Minimum along axis (JIT-compatible).
 
@@ -685,13 +681,13 @@ class DataFrame:
         result = jnp.nanmin(self._numeric_data, axis=axis)
 
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name='min')
+            return Series(result, index=np.array(self._numeric_cols), name="min")
         elif axis == 1:
-            return Series(result, index=self._index, name='min')
+            return Series(result, index=self._index, name="min")
         else:
             return result
 
-    def max(self, axis: Optional[int] = 0):
+    def max(self, axis: int | None = 0):
         """
         Maximum along axis (JIT-compatible).
 
@@ -705,13 +701,13 @@ class DataFrame:
         result = jnp.nanmax(self._numeric_data, axis=axis)
 
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name='max')
+            return Series(result, index=np.array(self._numeric_cols), name="max")
         elif axis == 1:
-            return Series(result, index=self._index, name='max')
+            return Series(result, index=self._index, name="max")
         else:
             return result
 
-    def prod(self, axis: Optional[int] = 0):
+    def prod(self, axis: int | None = 0):
         """
         Product along axis (JIT-compatible, differentiable).
 
@@ -723,29 +719,51 @@ class DataFrame:
         result = jnp.nanprod(self._numeric_data, axis=axis)
 
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name='prod')
+            return Series(result, index=np.array(self._numeric_cols), name="prod")
         elif axis == 1:
-            return Series(result, index=self._index, name='prod')
+            return Series(result, index=self._index, name="prod")
         else:
             return result
 
     def abs(self):
-        """
-        Absolute value (JIT-compatible).
+        """Absolute value (JIT-compatible). Gradient is non-smooth at zero."""
+        return self._apply_blockwise(jnp.abs)
 
-        Note: Gradient is non-smooth at zero.
-        """
-        if not self._dtype_blocks:
-            raise ValueError("No numeric columns for absolute value")
+    def _apply_blockwise(self, fn):
+        """Apply fn to each dtype block, return new DataFrame via _from_parts."""
+        new_blocks = {dtype: fn(block) for dtype, block in self._dtype_blocks.items()}
+        # Determine new dtype for column_to_block mapping
+        new_column_to_block = {}
+        for col, (old_dtype, idx) in self._column_to_block.items():
+            new_dtype = new_blocks[old_dtype].dtype
+            new_column_to_block[col] = (new_dtype, idx)
+        # Re-key blocks by their actual dtype
+        rekeyed = {}
+        for old_dtype, block in new_blocks.items():
+            rekeyed[block.dtype] = block
+        return DataFrame._from_parts(
+            dtype_blocks=rekeyed,
+            column_to_block=new_column_to_block,
+            object_data=self._object_data,
+            index=self._index,
+            column_order=self._column_order,
+        )
 
-        # Apply abs to each column, preserving dtype
-        result_data = {}
-        for col in self._column_order:
-            if col in self._column_to_block:
-                col_data = self._get_column_data(col)
-                result_data[col] = jnp.abs(col_data)
+    def isna(self):
+        """Return boolean DataFrame indicating NaN positions (JIT-compatible)."""
+        return self._apply_blockwise(jnp.isnan)
 
-        return DataFrame(result_data, index=self._index.copy())
+    isnull = isna
+
+    def notna(self):
+        """Return boolean DataFrame indicating non-NaN positions (JIT-compatible)."""
+        return self._apply_blockwise(lambda block: ~jnp.isnan(block))
+
+    notnull = notna
+
+    def fillna(self, value):
+        """Replace NaN with value (JIT-compatible)."""
+        return self._apply_blockwise(lambda block: jnp.where(jnp.isnan(block), value, block))
 
     def corr(self):
         """
@@ -770,10 +788,10 @@ class DataFrame:
         corr_matrix = cov_matrix / jnp.outer(std_devs, std_devs)
 
         # Create DataFrame with column names as both index and columns
-        return DataFrame({
-            col: corr_matrix[:, i]
-            for i, col in enumerate(self._numeric_cols)
-        }, index=np.array(self._numeric_cols))
+        return DataFrame(
+            {col: corr_matrix[:, i] for i, col in enumerate(self._numeric_cols)},
+            index=np.array(self._numeric_cols),
+        )
 
     def cov(self):
         """
@@ -795,10 +813,10 @@ class DataFrame:
         cov_matrix = (centered.T @ centered) / (len(self._index) - 1)
 
         # Create DataFrame with column names as both index and columns
-        return DataFrame({
-            col: cov_matrix[:, i]
-            for i, col in enumerate(self._numeric_cols)
-        }, index=np.array(self._numeric_cols))
+        return DataFrame(
+            {col: cov_matrix[:, i] for i, col in enumerate(self._numeric_cols)},
+            index=np.array(self._numeric_cols),
+        )
 
     # ========================================
     # Shape manipulation
@@ -835,10 +853,9 @@ class DataFrame:
         new_index = np.array(self._numeric_cols)
 
         # Create new DataFrame
-        return DataFrame({
-            col: transposed_data[:, i]
-            for i, col in enumerate(new_cols)
-        }, index=new_index)
+        return DataFrame(
+            {col: transposed_data[:, i] for i, col in enumerate(new_cols)}, index=new_index
+        )
 
     # ========================================
     # Time series operations
@@ -859,46 +876,28 @@ class DataFrame:
             >>> df.shift(1)  # Shift forward by 1 (introduce lag)
             >>> df.shift(-1)  # Shift backward by 1 (lead)
         """
-        if not self._dtype_blocks:
-            raise ValueError("No numeric columns to shift")
-
         if periods == 0:
             return self
 
-        # Use NaN as default fill_value (matching pandas behavior)
         if fill_value is None:
             fill_value = jnp.nan
 
         n_rows = len(self._index)
 
-        # Apply shift to each column, preserving dtype
-        result_data = {}
-        for col in self._column_order:
-            if col in self._column_to_block:
-                col_data = self._get_column_data(col)
+        def _shift_block(block):
+            if periods > 0:
+                if periods >= n_rows:
+                    return jnp.full_like(block, fill_value)
+                pad = jnp.full((periods, block.shape[1]), fill_value, dtype=block.dtype)
+                return jnp.concatenate([pad, block[:-periods]], axis=0)
+            else:
+                ap = abs(periods)
+                if ap >= n_rows:
+                    return jnp.full_like(block, fill_value)
+                pad = jnp.full((ap, block.shape[1]), fill_value, dtype=block.dtype)
+                return jnp.concatenate([block[ap:], pad], axis=0)
 
-                if periods > 0:
-                    # Shift forward (lag) - add fill_value at the beginning
-                    if periods >= n_rows:
-                        # If shifting by more than length, return all fill_value
-                        new_col_data = jnp.full_like(col_data, fill_value)
-                    else:
-                        padding = jnp.full((periods,), fill_value, dtype=col_data.dtype)
-                        new_col_data = jnp.concatenate([padding, col_data[:-periods]], axis=0)
-                else:
-                    # Shift backward (lead) - add fill_value at the end
-                    abs_periods = abs(periods)
-                    if abs_periods >= n_rows:
-                        # If shifting by more than length, return all fill_value
-                        new_col_data = jnp.full_like(col_data, fill_value)
-                    else:
-                        padding = jnp.full((abs_periods,), fill_value, dtype=col_data.dtype)
-                        new_col_data = jnp.concatenate([col_data[abs_periods:], padding], axis=0)
-
-                result_data[col] = new_col_data
-
-        # Note: object data is not shifted, similar to old behavior
-        return DataFrame(result_data, index=self._index.copy())
+        return self._apply_blockwise(_shift_block)
 
     def diff(self, periods: int = 1):
         """
@@ -1089,23 +1088,16 @@ class DataFrame:
             >>> df.clip(0, 10)  # Clip to [0, 10]
             >>> df.clip(lower=0)  # Clip minimum to 0
         """
-        if not self._dtype_blocks:
-            raise ValueError("No numeric columns to clip")
 
-        # Apply clipping to each column
-        result_data = {}
-        for col in self._column_order:
-            if col in self._column_to_block:
-                col_data = self._get_column_data(col)
+        def _clip_block(block):
+            result = block
+            if lower is not None:
+                result = jnp.maximum(result, lower)
+            if upper is not None:
+                result = jnp.minimum(result, upper)
+            return result
 
-                if lower is not None:
-                    col_data = jnp.maximum(col_data, lower)
-                if upper is not None:
-                    col_data = jnp.minimum(col_data, upper)
-
-                result_data[col] = col_data
-
-        return DataFrame(result_data, index=self._index.copy())
+        return self._apply_blockwise(_clip_block)
 
     # ========================================
     # Indexing and selection
@@ -1197,7 +1189,7 @@ class DataFrame:
         This enables df.x to access column 'x'.
         """
         # Avoid infinite recursion for internal attributes
-        if name.startswith('_'):
+        if name.startswith("_"):
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
         # Check if it's a column
@@ -1210,27 +1202,27 @@ class DataFrame:
     # Comparison operations
     # ========================================
 
-    def __gt__(self, other) -> 'DataFrame':
+    def __gt__(self, other) -> "DataFrame":
         """Greater than comparison (JIT-compatible, returns boolean)."""
         return self._apply_comparison(other, jnp.greater, "greater than")
 
-    def __ge__(self, other) -> 'DataFrame':
+    def __ge__(self, other) -> "DataFrame":
         """Greater than or equal comparison (JIT-compatible, returns boolean)."""
         return self._apply_comparison(other, jnp.greater_equal, "greater than or equal")
 
-    def __lt__(self, other) -> 'DataFrame':
+    def __lt__(self, other) -> "DataFrame":
         """Less than comparison (JIT-compatible, returns boolean)."""
         return self._apply_comparison(other, jnp.less, "less than")
 
-    def __le__(self, other) -> 'DataFrame':
+    def __le__(self, other) -> "DataFrame":
         """Less than or equal comparison (JIT-compatible, returns boolean)."""
         return self._apply_comparison(other, jnp.less_equal, "less than or equal")
 
-    def __eq__(self, other) -> 'DataFrame':
+    def __eq__(self, other) -> "DataFrame":
         """Equality comparison (JIT-compatible, returns boolean)."""
         return self._apply_comparison(other, jnp.equal, "equality")
 
-    def __ne__(self, other) -> 'DataFrame':
+    def __ne__(self, other) -> "DataFrame":
         """Not equal comparison (JIT-compatible, returns boolean)."""
         return self._apply_comparison(other, jnp.not_equal, "not equal")
 
@@ -1238,15 +1230,15 @@ class DataFrame:
     # Logical operations
     # ========================================
 
-    def __and__(self, other) -> 'DataFrame':
+    def __and__(self, other) -> "DataFrame":
         """Logical AND (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.bitwise_and, "logical AND")
 
-    def __or__(self, other) -> 'DataFrame':
+    def __or__(self, other) -> "DataFrame":
         """Logical OR (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.bitwise_or, "logical OR")
 
-    def __invert__(self) -> 'DataFrame':
+    def __invert__(self) -> "DataFrame":
         """Logical NOT (JIT-compatible)."""
         if not self._dtype_blocks:
             raise ValueError("No numeric columns for logical NOT")
@@ -1256,7 +1248,7 @@ class DataFrame:
         for col in self._column_order:
             if col in self._column_to_block:
                 col_data = self._get_column_data(col)
-                # Convert to boolean if needed (handles comparison results that might be 0/1 as ints/floats)
+                # Convert to boolean if needed (handles 0/1 as ints/floats)
                 bool_data = col_data.astype(bool)
                 result_data[col] = ~bool_data
 
@@ -1305,7 +1297,8 @@ class DataFrame:
 
             # Update column_to_block mapping - all columns now have bool dtype
             new_column_to_block = {}
-            for idx, col in enumerate([c for c in self._column_order if c in self._column_to_block]):
+            numeric_cols = [c for c in self._column_order if c in self._column_to_block]
+            for idx, col in enumerate(numeric_cols):
                 new_column_to_block[col] = (bool_dtype, idx)
 
             return DataFrame._from_parts(
@@ -1364,7 +1357,8 @@ class DataFrame:
                 new_dtype_blocks[bool_dtype] = jnp.concatenate(bool_cols, axis=1)
 
             new_column_to_block = {}
-            for idx, col in enumerate([c for c in self._column_order if c in self._column_to_block]):
+            numeric_cols = [c for c in self._column_order if c in self._column_to_block]
+            for idx, col in enumerate(numeric_cols):
                 new_column_to_block[col] = (bool_dtype, idx)
 
             return DataFrame._from_parts(
@@ -1433,7 +1427,7 @@ class DataFrame:
 
             return DataFrame(result_data, index=self._index.copy())
 
-        elif type(other).__name__ == 'Series':
+        elif type(other).__name__ == "Series":
             # Series broadcasts across rows (like pandas)
             # Each column gets the corresponding value from the Series
             result_data = {}
@@ -1444,7 +1438,7 @@ class DataFrame:
 
                     # Find this column's value in the Series
                     # Series._index contains column names, Series._data contains values
-                    if hasattr(other, '_index'):
+                    if hasattr(other, "_index"):
                         # Find column position in Series index
                         series_idx = np.where(other._index == col)[0]
                         if len(series_idx) > 0:
@@ -1595,10 +1589,17 @@ class _ILocIndexer:
                         if col in self._df._column_to_block:
                             numeric_data.append(data_dict[col])
                     data = jnp.array(numeric_data)
-                    return Series(data, index=np.array(self._df._numeric_cols), name=self._df._index[key])
+                    idx_name = self._df._index[key]
+                    return Series(
+                        data,
+                        index=np.array(self._df._numeric_cols),
+                        name=idx_name,
+                    )
                 else:
                     # Only object columns
-                    raise NotImplementedError("Single row selection with only object columns not yet supported")
+                    raise NotImplementedError(
+                        "Single row selection with only object columns not yet supported"
+                    )
             else:
                 # Multiple rows -> DataFrame
                 # Index all dtype blocks
@@ -1634,9 +1635,9 @@ class Series:
     Simpler than DataFrame but similar interface.
     """
 
-    _data: Union[jnp.ndarray, np.ndarray]
+    _data: jnp.ndarray | np.ndarray
     _index: np.ndarray
-    _name: Optional[str] = None
+    _name: str | None = None
 
     def __init__(self, data, index=None, name=None):
         """Create a Series from array-like data."""
@@ -1675,6 +1676,58 @@ class Series:
         """Mean of all values (JIT-compatible)."""
         return jnp.mean(self._data)
 
+    def abs(self):
+        """Absolute value."""
+        return Series(jnp.abs(self._data), index=self._index, name=self._name)
+
+    # Arithmetic operators
+    def _binop(self, other, op):
+        other_data = other._data if isinstance(other, Series) else other
+        return Series(op(self._data, other_data), index=self._index, name=self._name)
+
+    def __add__(self, other):
+        return self._binop(other, jnp.add)
+
+    def __sub__(self, other):
+        return self._binop(other, jnp.subtract)
+
+    def __mul__(self, other):
+        return self._binop(other, jnp.multiply)
+
+    def __truediv__(self, other):
+        return self._binop(other, jnp.true_divide)
+
+    def __floordiv__(self, other):
+        return self._binop(other, jnp.floor_divide)
+
+    def __mod__(self, other):
+        return self._binop(other, jnp.mod)
+
+    def __pow__(self, other):
+        return self._binop(other, jnp.power)
+
+    def __neg__(self):
+        return Series(jnp.negative(self._data), index=self._index, name=self._name)
+
+    # Comparison operators
+    def __gt__(self, other):
+        return self._binop(other, jnp.greater)
+
+    def __ge__(self, other):
+        return self._binop(other, jnp.greater_equal)
+
+    def __lt__(self, other):
+        return self._binop(other, jnp.less)
+
+    def __le__(self, other):
+        return self._binop(other, jnp.less_equal)
+
+    def __eq__(self, other):
+        return self._binop(other, jnp.equal)
+
+    def __ne__(self, other):
+        return self._binop(other, jnp.not_equal)
+
     def __repr__(self):
         """String representation."""
         lines = [f"Series(name={self._name}, shape={len(self._data)})"]
@@ -1689,6 +1742,7 @@ class Series:
 # ========================================
 # JAX Pytree Registration
 # ========================================
+
 
 def _dataframe_flatten(df: DataFrame):
     """
@@ -1705,11 +1759,11 @@ def _dataframe_flatten(df: DataFrame):
 
     # Aux data: metadata that doesn't participate in JAX ops
     aux_data = {
-        'dtypes_order': dtypes_order,
-        'column_to_block': df._column_to_block,
-        'object_data': df._object_data,
-        'index': df._index,
-        'column_order': df._column_order,
+        "dtypes_order": dtypes_order,
+        "column_to_block": df._column_to_block,
+        "object_data": df._object_data,
+        "index": df._index,
+        "column_order": df._column_order,
     }
 
     return children, aux_data
@@ -1719,15 +1773,15 @@ def _dataframe_unflatten(aux_data, children):
     """Reconstruct DataFrame from flattened representation (dtype blocks version)."""
     # Reconstruct dtype_blocks from children and dtypes_order
     dtype_blocks = {}
-    for dtype, block in zip(aux_data['dtypes_order'], children):
+    for dtype, block in zip(aux_data["dtypes_order"], children):
         dtype_blocks[dtype] = block
 
     return DataFrame._from_parts(
         dtype_blocks=dtype_blocks,
-        column_to_block=aux_data['column_to_block'],
-        object_data=aux_data['object_data'],
-        index=aux_data['index'],
-        column_order=aux_data['column_order'],
+        column_to_block=aux_data["column_to_block"],
+        object_data=aux_data["object_data"],
+        index=aux_data["index"],
+        column_order=aux_data["column_order"],
     )
 
 
@@ -1743,16 +1797,16 @@ def _series_flatten(series: Series):
     """Flatten Series for JAX transformations."""
     children = (series._data,)
     aux_data = {
-        'index': series._index,
-        'name': series._name,
+        "index": series._index,
+        "name": series._name,
     }
     return children, aux_data
 
 
 def _series_unflatten(aux_data, children):
     """Reconstruct Series from flattened representation."""
-    data, = children
-    return Series(data, index=aux_data['index'], name=aux_data['name'])
+    (data,) = children
+    return Series(data, index=aux_data["index"], name=aux_data["name"])
 
 
 # Register Series as a JAX pytree

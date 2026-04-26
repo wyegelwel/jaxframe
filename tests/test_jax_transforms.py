@@ -56,6 +56,8 @@ OPERATIONS = [
     # Column manipulation (Session 6)
     ("drop_sum", lambda df: df.drop(columns=["a"]).sum(axis=None), True, True),
     ("rename_sum", lambda df: df.rename(columns={"a": "x"}).sum(axis=None), True, True),
+    # Apply (Session 7)
+    ("apply_sum", lambda df: df.apply(jnp.sum, axis=0).sum(), True, True),
 ]
 
 

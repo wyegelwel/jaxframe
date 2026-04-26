@@ -433,3 +433,19 @@ COLUMN_CASES = [
 @pytest.mark.parametrize("name,data,op", COLUMN_CASES, ids=[c[0] for c in COLUMN_CASES])
 def test_column_ops(name, data, op):
     run_equiv(data, op)
+
+
+# ============================
+# Apply (Session 7)
+# ============================
+
+APPLY_CASES = [
+    ("apply_sum_ax0", NUMERIC_3COL, lambda df: df.apply(np.sum, axis=0)),
+    ("apply_mean_ax0", NUMERIC_3COL, lambda df: df.apply(np.mean, axis=0)),
+    ("apply_sum_ax1", NUMERIC_3COL, lambda df: df.apply(np.sum, axis=1)),
+]
+
+
+@pytest.mark.parametrize("name,data,op", APPLY_CASES, ids=[c[0] for c in APPLY_CASES])
+def test_apply(name, data, op):
+    run_equiv(data, op)

@@ -1050,6 +1050,32 @@ class DataFrame:
         return DataFrame(data, index=self._index)
 
     # ========================================
+    # Apply
+    # ========================================
+
+    def apply(self, func, axis=0):
+        """Apply function along axis. JIT-compatible if func is JIT-compatible."""
+        data = self.values
+        if axis == 0:
+            # Apply func to each column -> Series
+            results = []
+            for i in range(data.shape[1]):
+                results.append(func(data[:, i]))
+            return Series(
+                jnp.array(results),
+                index=np.array(self._numeric_cols),
+            )
+        else:
+            # Apply func to each row -> Series
+            results = []
+            for i in range(data.shape[0]):
+                results.append(func(data[i, :]))
+            return Series(
+                jnp.array(results),
+                index=self._index,
+            )
+
+    # ========================================
     # Pandas interop & copy
     # ========================================
 

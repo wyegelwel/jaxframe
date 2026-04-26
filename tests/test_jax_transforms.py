@@ -74,6 +74,9 @@ OPERATIONS = [
     ("roll_mean", lambda df: df.rolling(2).mean().sum(axis=None), True, True),
     ("roll_min", lambda df: df.rolling(2).min().sum(axis=None), True, False),
     ("roll_max", lambda df: df.rolling(2).max().sum(axis=None), True, False),
+    # Session 17: skew, kurt, sem (JIT+grad)
+    ("skew_sum", lambda df: df.skew().values.sum(), True, True),
+    ("sem_sum", lambda df: df.sem().values.sum(), True, True),
 ]
 
 # GroupBy JAX compat — segment ops are JIT+grad compatible
@@ -112,6 +115,29 @@ class TestJAXCompat:
         grads = grad_fn(df)
         for block in grads._dtype_blocks.values():
             assert jnp.all(jnp.isfinite(block)), f"{name} produced non-finite gradients"
+
+
+# Kurtosis needs n>=4 (denominator has (n-2)*(n-3))
+KURT_DATA = {"a": [1.0, 2.0, 3.0, 4.0], "b": [4.0, 5.0, 6.0, 7.0]}
+
+
+def _kurt_op(df):
+    return df.kurt().values.sum()
+
+
+class TestKurtJAX:
+    def test_jit(self):
+        df = DataFrame(KURT_DATA)
+        eager = _kurt_op(df)
+        jitted = jax.jit(_kurt_op)(df)
+        assert_allclose(float(eager), float(jitted), rtol=1e-5)
+
+    def test_grad(self):
+        df = DataFrame(KURT_DATA)
+        grad_fn = jax.grad(_kurt_op)
+        grads = grad_fn(df)
+        for block in grads._dtype_blocks.values():
+            assert jnp.all(jnp.isfinite(block)), "kurt produced non-finite grads"
 
 
 # All groups have >=2 elements so var/std gradients are finite

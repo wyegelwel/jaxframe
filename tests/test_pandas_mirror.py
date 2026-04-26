@@ -1095,3 +1095,106 @@ class TestTimeRolling:
             pd_result.values.astype(np.float32),
             rtol=1e-4,
         )
+
+
+# ============================
+# Session 17: value_counts, nunique, mode, skew, kurt, sem
+# ============================
+
+STATS_DATA = {
+    "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "b": [10.0, 20.0, 30.0, 40.0, 50.0],
+}
+
+SKEW_DATA = {
+    "a": [1.0, 2.0, 2.0, 3.0, 10.0],
+    "b": [1.0, 1.0, 1.0, 2.0, 100.0],
+}
+
+
+def test_nunique():
+    from jaxframe import DataFrame
+
+    pdf = pd.DataFrame(STATS_DATA)
+    jdf = DataFrame(STATS_DATA)
+    pd_result = pdf.nunique()
+    jf_result = jdf.nunique()
+    np.testing.assert_array_equal(np.asarray(jf_result.values), pd_result.values)
+
+
+def test_skew():
+    from jaxframe import DataFrame
+
+    pdf = pd.DataFrame(SKEW_DATA)
+    jdf = DataFrame(SKEW_DATA)
+    pd_result = pdf.skew()
+    jf_result = jdf.skew()
+    np.testing.assert_allclose(
+        np.asarray(jf_result.values),
+        pd_result.values.astype(np.float32),
+        rtol=1e-4,
+    )
+
+
+def test_kurt():
+    from jaxframe import DataFrame
+
+    pdf = pd.DataFrame(SKEW_DATA)
+    jdf = DataFrame(SKEW_DATA)
+    pd_result = pdf.kurt()
+    jf_result = jdf.kurt()
+    np.testing.assert_allclose(
+        np.asarray(jf_result.values),
+        pd_result.values.astype(np.float32),
+        rtol=1e-4,
+    )
+
+
+def test_sem():
+    from jaxframe import DataFrame
+
+    pdf = pd.DataFrame(STATS_DATA)
+    jdf = DataFrame(STATS_DATA)
+    pd_result = pdf.sem()
+    jf_result = jdf.sem()
+    np.testing.assert_allclose(
+        np.asarray(jf_result.values),
+        pd_result.values.astype(np.float32),
+        rtol=1e-5,
+    )
+
+
+def test_mode():
+    from jaxframe import DataFrame as JDF
+
+    data = {"a": [1.0, 1.0, 2.0, 3.0, 3.0], "b": [10.0, 10.0, 10.0, 20.0, 20.0]}
+    pdf = pd.DataFrame(data)
+    jdf = JDF(data)
+    pd_result = pdf.mode()
+    jf_result = jdf.mode()
+    # mode may return multiple rows; compare first row
+    np.testing.assert_allclose(
+        np.asarray(jf_result.values)[0],
+        pd_result.values[0].astype(np.float32),
+        rtol=1e-5,
+    )
+
+
+def test_value_counts_series():
+    from jaxframe import Series
+
+    data = [1.0, 2.0, 2.0, 3.0, 3.0, 3.0]
+    ps = pd.Series(data)
+    js = Series(data)
+    pd_result = ps.value_counts()
+    jf_result = js.value_counts()
+    # Sort by value for consistent comparison
+    pd_sorted = pd_result.sort_index()
+    jf_vals = np.asarray(jf_result.values)
+    jf_idx = np.asarray(jf_result.index)
+    order = np.argsort(jf_idx)
+    np.testing.assert_array_equal(jf_vals[order], pd_sorted.values)
+    np.testing.assert_allclose(
+        jf_idx[order].astype(np.float32),
+        pd_sorted.index.values.astype(np.float32),
+    )

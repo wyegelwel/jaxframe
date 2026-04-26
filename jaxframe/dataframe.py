@@ -816,6 +816,81 @@ class DataFrame:
 
         return self._apply_blockwise(_check_block)
 
+    def nunique(self, axis: int = 0):
+        """Count unique values per column. Not JIT-compatible (uses np.unique)."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        data = np.asarray(self._numeric_data)
+        if axis == 0:
+            counts = [len(np.unique(data[:, i])) for i in range(data.shape[1])]
+            return Series(jnp.array(counts), index=np.array(self._numeric_cols), name="nunique")
+        else:
+            counts = [len(np.unique(data[i, :])) for i in range(data.shape[0])]
+            return Series(jnp.array(counts), index=self._index, name="nunique")
+
+    def skew(self, axis: int = 0):
+        """Skewness (JIT-compatible, differentiable)."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        data = self._numeric_data
+        n = data.shape[axis]
+        mean = jnp.nanmean(data, axis=axis, keepdims=True)
+        m2 = jnp.nansum((data - mean) ** 2, axis=axis)
+        m3 = jnp.nansum((data - mean) ** 3, axis=axis)
+        # Bias-corrected skewness (pandas default)
+        s2 = m2 / (n - 1)
+        result = (m3 / n) / (s2**1.5) * (n**2) / ((n - 1) * (n - 2))
+        if axis == 0:
+            return Series(result, index=np.array(self._numeric_cols), name="skew")
+        else:
+            return Series(result, index=self._index, name="skew")
+
+    def kurt(self, axis: int = 0):
+        """Excess kurtosis (JIT-compatible, differentiable)."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        data = self._numeric_data
+        n = data.shape[axis]
+        mean = jnp.nanmean(data, axis=axis, keepdims=True)
+        m2 = jnp.nansum((data - mean) ** 2, axis=axis)
+        m4 = jnp.nansum((data - mean) ** 4, axis=axis)
+        # Bias-corrected excess kurtosis (pandas default)
+        s2 = m2 / (n - 1)
+        adj = (n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))
+        result = adj * (m4 / (s2**2)) - 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3))
+        if axis == 0:
+            return Series(result, index=np.array(self._numeric_cols), name="kurt")
+        else:
+            return Series(result, index=self._index, name="kurt")
+
+    kurtosis = kurt
+
+    def sem(self, axis: int = 0, ddof: int = 1):
+        """Standard error of the mean (JIT-compatible, differentiable)."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        std = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
+        n = self._numeric_data.shape[axis]
+        result = std / jnp.sqrt(n)
+        if axis == 0:
+            return Series(result, index=np.array(self._numeric_cols), name="sem")
+        else:
+            return Series(result, index=self._index, name="sem")
+
+    def mode(self, axis: int = 0):
+        """Mode (most frequent value). Not JIT-compatible."""
+        if self._numeric_data is None:
+            raise ValueError("No numeric columns")
+        data = np.asarray(self._numeric_data)
+        if axis == 0:
+            modes = []
+            for i in range(data.shape[1]):
+                vals, counts = np.unique(data[:, i], return_counts=True)
+                modes.append(vals[np.argmax(counts)])
+            return DataFrame({col: [m] for col, m in zip(self._numeric_cols, modes)})
+        else:
+            raise NotImplementedError("mode(axis=1) not yet supported")
+
     def _apply_cross_column(self, fn):
         """Apply fn across all numeric columns (axis=1 ops). JIT-compatible."""
         data = self.values  # (n_rows, n_numeric_cols)
@@ -2082,6 +2157,16 @@ class Series:
     def abs(self):
         """Absolute value."""
         return Series(jnp.abs(self._data), index=self._index, name=self._name)
+
+    def value_counts(self, sort=True):
+        """Count occurrences of each unique value. Not JIT-compatible."""
+        data = np.asarray(self._data)
+        unique_vals, counts = np.unique(data, return_counts=True)
+        if sort:
+            order = np.argsort(-counts)
+            unique_vals = unique_vals[order]
+            counts = counts[order]
+        return Series(jnp.array(counts), index=unique_vals, name=self._name)
 
     # Arithmetic operators
     def _binop(self, other, op):

@@ -367,3 +367,24 @@ class TestPandasInterop:
         np.testing.assert_allclose(np.array(jdf.values), np.array(jdf2.values), rtol=1e-5)
         # Verify they don't share column_order list
         assert jdf._column_order is not jdf2._column_order
+
+
+# ============================
+# Sorting (Session 4)
+# ============================
+
+SORT_CASES = [
+    ("sort_by_a_asc", NUMERIC_2COL, lambda df: df.sort_values("a")),
+    ("sort_by_a_desc", NUMERIC_2COL, lambda df: df.sort_values("a", ascending=False)),
+    ("sort_by_b", NUMERIC_3COL, lambda df: df.sort_values("b")),
+    (
+        "sort_negatives",
+        WITH_NEGATIVES,
+        lambda df: df.sort_values("a"),
+    ),
+]
+
+
+@pytest.mark.parametrize("name,data,op", SORT_CASES, ids=[c[0] for c in SORT_CASES])
+def test_sorting(name, data, op):
+    run_equiv(data, op)

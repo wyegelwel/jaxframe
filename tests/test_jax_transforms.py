@@ -47,6 +47,8 @@ OPERATIONS = [
     ("median_sum", lambda df: df.median().sum(), True, False),
     # Copy (Session 3) — copy then reduce
     ("copy_sum", lambda df: df.copy().sum(axis=None), True, True),
+    # Sorting (Session 4) — argsort not differentiable
+    ("sort_sum", lambda df: df.sort_values("a").sum(axis=None), True, False),
 ]
 
 

@@ -912,6 +912,32 @@ class DataFrame:
         )
 
     # ========================================
+    # Sorting
+    # ========================================
+
+    def sort_values(self, by, ascending=True):
+        """Sort by column values using argsort. JIT-compatible."""
+        if isinstance(by, str):
+            by = [by]
+        # Get the primary sort column
+        col = by[0]
+        dtype, idx = self._column_to_block[col]
+        sort_col = self._dtype_blocks[dtype][:, idx]
+        order = jnp.argsort(sort_col)
+        if not ascending:
+            order = order[::-1]
+        # Apply sort order to all blocks
+        new_blocks = {dt: block[order] for dt, block in self._dtype_blocks.items()}
+        # Index is static aux data in pytree — keep original under JIT
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=dict(self._column_to_block),
+            object_data=self._object_data,
+            index=self._index,
+            column_order=list(self._column_order),
+        )
+
+    # ========================================
     # Pandas interop & copy
     # ========================================
 

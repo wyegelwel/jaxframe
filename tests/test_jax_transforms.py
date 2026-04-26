@@ -64,6 +64,18 @@ OPERATIONS = [
     ("rmul_sum", lambda df: (3 * df).sum(axis=None), True, True),
 ]
 
+# GroupBy JAX compat — segment ops are JIT+grad compatible
+# Group discovery is eager; aggregation ops use jax.ops.segment_*
+GROUPBY_OPS = [
+    ("gb_sum", lambda sgb: sgb.sum().values.sum(), True, True),
+    ("gb_mean", lambda sgb: sgb.mean().values.sum(), True, True),
+    ("gb_min", lambda sgb: sgb.min().values.sum(), True, False),
+    ("gb_max", lambda sgb: sgb.max().values.sum(), True, False),
+    ("gb_var", lambda sgb: sgb.var().values.sum(), True, True),
+    ("gb_std", lambda sgb: sgb.std().values.sum(), True, True),
+    ("gb_count", lambda sgb: sgb.count().values.sum(), True, False),
+]
+
 
 @pytest.mark.parametrize("name,op,jit_ok,grad_ok", OPERATIONS, ids=[o[0] for o in OPERATIONS])
 class TestJAXCompat:
@@ -83,3 +95,29 @@ class TestJAXCompat:
         grads = grad_fn(df)
         for block in grads._dtype_blocks.values():
             assert jnp.all(jnp.isfinite(block)), f"{name} produced non-finite gradients"
+
+
+# All groups have >=2 elements so var/std gradients are finite
+GROUPBY_JAXDATA = {"a": [1.0, 1.0, 2.0, 2.0, 3.0, 3.0], "b": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]}
+
+
+@pytest.mark.parametrize("name,op,jit_ok,grad_ok", GROUPBY_OPS, ids=[o[0] for o in GROUPBY_OPS])
+class TestGroupByJAX:
+    def test_jit(self, name, op, jit_ok, grad_ok):
+        if not jit_ok:
+            pytest.skip(f"{name} not JIT-compatible")
+        df = DataFrame(GROUPBY_JAXDATA)
+        gb = df.groupby("a")["b"]  # SeriesGroupBy — pytree registered
+        eager_result = op(gb)
+        jitted_result = jax.jit(op)(gb)
+        assert_allclose(float(eager_result), float(jitted_result), rtol=1e-5)
+
+    def test_grad(self, name, op, jit_ok, grad_ok):
+        if not grad_ok:
+            pytest.skip(f"{name} not differentiable")
+        df = DataFrame(GROUPBY_JAXDATA)
+        gb = df.groupby("a")["b"]
+        grad_fn = jax.grad(op)
+        grads = grad_fn(gb)
+        # grads is a SeriesGroupBy pytree — check the data leaf
+        assert jnp.all(jnp.isfinite(grads._data)), f"{name} produced non-finite grads"

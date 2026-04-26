@@ -469,3 +469,130 @@ REVERSE_OP_CASES = [
 @pytest.mark.parametrize("name,data,op", REVERSE_OP_CASES, ids=[c[0] for c in REVERSE_OP_CASES])
 def test_reverse_ops(name, data, op):
     run_equiv(data, op)
+
+
+# ============================
+# GroupBy (Sessions 9-11)
+# ============================
+
+GROUPBY_DATA = {
+    "key": [1.0, 1.0, 2.0, 2.0, 3.0],
+    "val": [10.0, 20.0, 30.0, 40.0, 50.0],
+}
+GROUPBY_MULTI = {
+    "key": [1.0, 1.0, 2.0, 2.0],
+    "a": [10.0, 20.0, 30.0, 40.0],
+    "b": [100.0, 200.0, 300.0, 400.0],
+}
+GROUPBY_STD = {
+    "key": [1.0, 1.0, 2.0, 2.0, 2.0],
+    "val": [10.0, 20.0, 30.0, 40.0, 50.0],
+}
+
+
+class TestGroupBy:
+    """Test groupby operations match pandas."""
+
+    def _compare_series(self, pd_result, jf_result, rtol=1e-5):
+        """Compare pandas Series vs jaxframe Series, sorted by index."""
+        pd_sorted = pd_result.sort_index()
+        jf_idx = np.asarray(jf_result.index)
+        jf_vals = np.asarray(jf_result.values)
+        sort_order = np.argsort(jf_idx)
+        np.testing.assert_allclose(
+            jf_vals[sort_order].astype(np.float32),
+            pd_sorted.values.astype(np.float32),
+            rtol=rtol,
+        )
+
+    def _compare_df(self, pd_result, jf_result, rtol=1e-5):
+        """Compare pandas DataFrame vs jaxframe DataFrame, sorted by index."""
+        pd_sorted = pd_result.sort_index()
+        jf_pandas = jf_result.to_pandas().sort_index()
+        np.testing.assert_allclose(
+            jf_pandas.values.astype(np.float32),
+            pd_sorted.values.astype(np.float32),
+            rtol=rtol,
+        )
+
+    def test_sum(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].sum(),
+            jdf.groupby("key")["val"].sum(),
+        )
+
+    def test_mean(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].mean(),
+            jdf.groupby("key")["val"].mean(),
+        )
+
+    def test_count(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].count(),
+            jdf.groupby("key")["val"].count(),
+        )
+
+    def test_min(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].min(),
+            jdf.groupby("key")["val"].min(),
+        )
+
+    def test_max(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_DATA), DataFrame(GROUPBY_DATA)
+        self._compare_series(
+            pdf.groupby("key")["val"].max(),
+            jdf.groupby("key")["val"].max(),
+        )
+
+    def test_std(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_STD), DataFrame(GROUPBY_STD)
+        self._compare_series(
+            pdf.groupby("key")["val"].std(),
+            jdf.groupby("key")["val"].std(),
+        )
+
+    def test_var(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_STD), DataFrame(GROUPBY_STD)
+        self._compare_series(
+            pdf.groupby("key")["val"].var(),
+            jdf.groupby("key")["val"].var(),
+        )
+
+    def test_df_sum(self):
+        """GroupBy on full DataFrame."""
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").sum(),
+            jdf.groupby("key").sum(),
+        )
+
+    def test_df_mean(self):
+        from jaxframe import DataFrame
+
+        pdf, jdf = pd.DataFrame(GROUPBY_MULTI), DataFrame(GROUPBY_MULTI)
+        self._compare_df(
+            pdf.groupby("key").mean(),
+            jdf.groupby("key").mean(),
+        )

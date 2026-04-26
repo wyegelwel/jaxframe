@@ -1098,6 +1098,38 @@ class DataFrame:
             )
 
     # ========================================
+    # GroupBy
+    # ========================================
+
+    def groupby(self, by):
+        """Group by column. Returns a DataFrameGroupBy object.
+
+        Group discovery is eager (computes unique groups and segment IDs).
+        All aggregation methods use jax.ops.segment_* and are JIT+grad compatible.
+        """
+        if isinstance(by, str):
+            by = [by]
+        # Extract key column(s) — eager numpy for group discovery
+        key_col = by[0]
+        dtype, idx = self._column_to_block[key_col]
+        key_data = np.asarray(self._dtype_blocks[dtype][:, idx])
+        # Discover groups eagerly
+        unique_keys, inverse = np.unique(key_data, return_inverse=True)
+        segment_ids = jnp.array(inverse, dtype=jnp.int32)
+        num_groups = len(unique_keys)
+        group_keys = jnp.array(unique_keys)
+        # Value columns = all columns except group key(s)
+        val_cols = [c for c in self._column_order if c not in by]
+        return DataFrameGroupBy(
+            df=self,
+            by=by,
+            segment_ids=segment_ids,
+            num_groups=num_groups,
+            group_keys=group_keys,
+            val_cols=val_cols,
+        )
+
+    # ========================================
     # Pandas interop & copy
     # ========================================
 
@@ -1951,6 +1983,11 @@ class Series:
         """Return series name."""
         return self._name
 
+    @property
+    def index(self):
+        """Return series index."""
+        return self._index
+
     def sum(self):
         """Sum of all values (JIT-compatible)."""
         return jnp.sum(self._data)
@@ -2045,6 +2082,170 @@ class Series:
 
 
 # ========================================
+# GroupBy
+# ========================================
+
+
+class SeriesGroupBy:
+    """GroupBy on a single column. Aggregations use jax.ops.segment_* (JIT+grad)."""
+
+    def __init__(self, data, segment_ids, num_groups, group_keys, name=None):
+        self._data = data  # 1-D JAX array
+        self._segment_ids = segment_ids  # int32 array
+        self._num_groups = num_groups  # static int
+        self._group_keys = group_keys  # JAX array of unique key values
+        self._name = name
+
+    def _result_series(self, values):
+        return Series(values, index=np.asarray(self._group_keys), name=self._name)
+
+    def sum(self):
+        result = jax.ops.segment_sum(self._data, self._segment_ids, self._num_groups)
+        return self._result_series(result)
+
+    def mean(self):
+        sums = jax.ops.segment_sum(self._data, self._segment_ids, self._num_groups)
+        counts = jax.ops.segment_sum(jnp.ones_like(self._data), self._segment_ids, self._num_groups)
+        return self._result_series(sums / counts)
+
+    def count(self):
+        counts = jax.ops.segment_sum(jnp.ones_like(self._data), self._segment_ids, self._num_groups)
+        return self._result_series(counts)
+
+    def min(self):
+        result = jax.ops.segment_min(self._data, self._segment_ids, self._num_groups)
+        return self._result_series(result)
+
+    def max(self):
+        result = jax.ops.segment_max(self._data, self._segment_ids, self._num_groups)
+        return self._result_series(result)
+
+    def std(self, ddof=1):
+        return self._result_series(jnp.sqrt(self.var(ddof=ddof).values))
+
+    def var(self, ddof=1):
+        counts = jax.ops.segment_sum(jnp.ones_like(self._data), self._segment_ids, self._num_groups)
+        sums = jax.ops.segment_sum(self._data, self._segment_ids, self._num_groups)
+        means = sums / counts
+        # Expand means back to per-row, compute squared deviations
+        row_means = means[self._segment_ids]
+        sq_devs = (self._data - row_means) ** 2
+        sum_sq = jax.ops.segment_sum(sq_devs, self._segment_ids, self._num_groups)
+        return self._result_series(sum_sq / (counts - ddof))
+
+    def prod(self):
+        result = jax.ops.segment_prod(self._data, self._segment_ids, self._num_groups)
+        return self._result_series(result)
+
+    def first(self):
+        # Take the first element per group (lowest index)
+        # Use segment_min on indices, then gather
+        indices = jnp.arange(len(self._data))
+        first_idx = jax.ops.segment_min(indices, self._segment_ids, self._num_groups)
+        return self._result_series(self._data[first_idx])
+
+    def last(self):
+        indices = jnp.arange(len(self._data))
+        last_idx = jax.ops.segment_max(indices, self._segment_ids, self._num_groups)
+        return self._result_series(self._data[last_idx])
+
+
+class DataFrameGroupBy:
+    """GroupBy on a DataFrame. Aggregations use jax.ops.segment_* (JIT+grad)."""
+
+    def __init__(self, df, by, segment_ids, num_groups, group_keys, val_cols):
+        self._df = df
+        self._by = by
+        self._segment_ids = segment_ids
+        self._num_groups = num_groups
+        self._group_keys = group_keys
+        self._val_cols = val_cols
+
+    def __getitem__(self, key):
+        """Select column(s) to aggregate."""
+        if isinstance(key, str):
+            # Return SeriesGroupBy
+            dtype, idx = self._df._column_to_block[key]
+            col_data = self._df._dtype_blocks[dtype][:, idx]
+            return SeriesGroupBy(
+                data=col_data,
+                segment_ids=self._segment_ids,
+                num_groups=self._num_groups,
+                group_keys=self._group_keys,
+                name=key,
+            )
+        raise NotImplementedError("Multi-column groupby selection not yet supported")
+
+    def _apply_segment_op(self, op_fn):
+        """Apply a segment op to all value columns, return DataFrame."""
+        results = {}
+        for col in self._val_cols:
+            dtype, idx = self._df._column_to_block[col]
+            col_data = self._df._dtype_blocks[dtype][:, idx]
+            results[col] = op_fn(col_data)
+        return DataFrame(results, index=np.asarray(self._group_keys))
+
+    def sum(self):
+        return self._apply_segment_op(
+            lambda d: jax.ops.segment_sum(d, self._segment_ids, self._num_groups)
+        )
+
+    def mean(self):
+        counts = jax.ops.segment_sum(
+            jnp.ones(len(self._segment_ids)), self._segment_ids, self._num_groups
+        )
+        return self._apply_segment_op(
+            lambda d: jax.ops.segment_sum(d, self._segment_ids, self._num_groups) / counts
+        )
+
+    def count(self):
+        counts = jax.ops.segment_sum(
+            jnp.ones(len(self._segment_ids)), self._segment_ids, self._num_groups
+        )
+        # All columns have same count
+        results = {col: counts for col in self._val_cols}
+        return DataFrame(results, index=np.asarray(self._group_keys))
+
+    def min(self):
+        return self._apply_segment_op(
+            lambda d: jax.ops.segment_min(d, self._segment_ids, self._num_groups)
+        )
+
+    def max(self):
+        return self._apply_segment_op(
+            lambda d: jax.ops.segment_max(d, self._segment_ids, self._num_groups)
+        )
+
+    def std(self, ddof=1):
+        counts = jax.ops.segment_sum(
+            jnp.ones(len(self._segment_ids)), self._segment_ids, self._num_groups
+        )
+
+        def _std_col(d):
+            sums = jax.ops.segment_sum(d, self._segment_ids, self._num_groups)
+            means = sums / counts
+            sq_devs = (d - means[self._segment_ids]) ** 2
+            sum_sq = jax.ops.segment_sum(sq_devs, self._segment_ids, self._num_groups)
+            return jnp.sqrt(sum_sq / (counts - ddof))
+
+        return self._apply_segment_op(_std_col)
+
+    def var(self, ddof=1):
+        counts = jax.ops.segment_sum(
+            jnp.ones(len(self._segment_ids)), self._segment_ids, self._num_groups
+        )
+
+        def _var_col(d):
+            sums = jax.ops.segment_sum(d, self._segment_ids, self._num_groups)
+            means = sums / counts
+            sq_devs = (d - means[self._segment_ids]) ** 2
+            sum_sq = jax.ops.segment_sum(sq_devs, self._segment_ids, self._num_groups)
+            return sum_sq / (counts - ddof)
+
+        return self._apply_segment_op(_var_col)
+
+
+# ========================================
 # JAX Pytree Registration
 # ========================================
 
@@ -2119,4 +2320,35 @@ jax.tree_util.register_pytree_node(
     Series,
     _series_flatten,
     _series_unflatten,
+)
+
+
+def _series_groupby_flatten(sgb):
+    """Flatten SeriesGroupBy for JAX — only data is a differentiable leaf.
+    segment_ids goes in aux (static) since it's integer indexing, not differentiable."""
+    children = (sgb._data,)
+    aux = {
+        "segment_ids": sgb._segment_ids,
+        "num_groups": sgb._num_groups,
+        "group_keys": sgb._group_keys,
+        "name": sgb._name,
+    }
+    return children, aux
+
+
+def _series_groupby_unflatten(aux, children):
+    (data,) = children
+    return SeriesGroupBy(
+        data=data,
+        segment_ids=aux["segment_ids"],
+        num_groups=aux["num_groups"],
+        group_keys=aux["group_keys"],
+        name=aux["name"],
+    )
+
+
+jax.tree_util.register_pytree_node(
+    SeriesGroupBy,
+    _series_groupby_flatten,
+    _series_groupby_unflatten,
 )

@@ -8,9 +8,8 @@ from pandas behavior.
 import numpy as np
 import pandas as pd
 import pytest
-import jax.numpy as jnp
 
-from jaxframe import DataFrame, Series, concat
+from jaxframe import DataFrame, concat
 
 
 class TestEdgeCases:
@@ -27,7 +26,7 @@ class TestEdgeCases:
 
     def test_single_row_operations(self):
         """Test operations on single-row DataFrames."""
-        data = {'a': [5.0], 'b': [10.0]}
+        data = {"a": [5.0], "b": [10.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -43,7 +42,7 @@ class TestEdgeCases:
 
     def test_single_column_operations(self):
         """Test operations on single-column DataFrames."""
-        data = {'a': [1.0, 2.0, 3.0]}
+        data = {"a": [1.0, 2.0, 3.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -59,7 +58,7 @@ class TestEdgeCases:
 
     def test_zero_values(self):
         """Test operations with zero values."""
-        data = {'a': [0.0, 1.0, 0.0], 'b': [2.0, 0.0, 3.0]}
+        data = {"a": [0.0, 1.0, 0.0], "b": [2.0, 0.0, 3.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -75,7 +74,7 @@ class TestEdgeCases:
 
     def test_negative_values(self):
         """Test operations with negative values."""
-        data = {'a': [-1.0, -2.0, -3.0], 'b': [4.0, -5.0, 6.0]}
+        data = {"a": [-1.0, -2.0, -3.0], "b": [4.0, -5.0, 6.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -91,7 +90,7 @@ class TestEdgeCases:
 
     def test_large_values(self):
         """Test operations with large values."""
-        data = {'a': [1e10, 2e10, 3e10], 'b': [1e20, 2e20, 3e20]}
+        data = {"a": [1e10, 2e10, 3e10], "b": [1e20, 2e20, 3e20]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -102,7 +101,7 @@ class TestEdgeCases:
 
     def test_small_values(self):
         """Test operations with very small values."""
-        data = {'a': [1e-10, 2e-10, 3e-10], 'b': [1e-20, 2e-20, 3e-20]}
+        data = {"a": [1e-10, 2e-10, 3e-10], "b": [1e-20, 2e-20, 3e-20]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -118,8 +117,8 @@ class TestChainedOperations:
     def setup_method(self):
         """Create test data."""
         self.data = {
-            'a': [1.0, 2.0, 3.0, 4.0, 5.0],
-            'b': [10.0, 20.0, 30.0, 40.0, 50.0],
+            "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "b": [10.0, 20.0, 30.0, 40.0, 50.0],
         }
         self.jf_df = DataFrame(self.data)
         self.pd_df = pd.DataFrame(self.data)
@@ -168,8 +167,8 @@ class TestBroadcasting:
     def setup_method(self):
         """Create test data."""
         self.data = {
-            'a': [1.0, 2.0, 3.0],
-            'b': [4.0, 5.0, 6.0],
+            "a": [1.0, 2.0, 3.0],
+            "b": [4.0, 5.0, 6.0],
         }
         self.jf_df = DataFrame(self.data)
         self.pd_df = pd.DataFrame(self.data)
@@ -190,7 +189,7 @@ class TestBroadcasting:
 
     def test_dataframe_broadcasting(self):
         """Test DataFrame-to-DataFrame operations with same shape."""
-        data2 = {'a': [10.0, 20.0, 30.0], 'b': [40.0, 50.0, 60.0]}
+        data2 = {"a": [10.0, 20.0, 30.0], "b": [40.0, 50.0, 60.0]}
         jf_df2 = DataFrame(data2)
         pd_df2 = pd.DataFrame(data2)
 
@@ -205,9 +204,9 @@ class TestIndexingEdgeCases:
     def setup_method(self):
         """Create test data."""
         self.data = {
-            'a': [1, 2, 3, 4, 5],
-            'b': [10, 20, 30, 40, 50],
-            'c': [100, 200, 300, 400, 500],
+            "a": [1, 2, 3, 4, 5],
+            "b": [10, 20, 30, 40, 50],
+            "c": [100, 200, 300, 400, 500],
         }
         self.jf_df = DataFrame(self.data)
         self.pd_df = pd.DataFrame(self.data)
@@ -249,12 +248,12 @@ class TestStatisticalEdgeCases:
 
     def test_std_single_value(self):
         """Test std with single row (std should be 0)."""
-        data = {'a': [5.0], 'b': [10.0]}
+        data = {"a": [5.0], "b": [10.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
-        jf_result = jf_df.std()
-        pd_result = pd_df.std()
+        jf_df.std()
+        pd_df.std()
         # pandas returns NaN for single value, we might return 0
         # This is a known difference
         # np.testing.assert_allclose(jf_result._data, pd_result.values, rtol=1e-5)
@@ -263,9 +262,9 @@ class TestStatisticalEdgeCases:
         """Test correlation with constant column."""
         # When a column is constant, correlation is undefined (NaN in pandas)
         data = {
-            'a': [1.0, 2.0, 3.0],
-            'b': [5.0, 5.0, 5.0],  # Constant
-            'c': [7.0, 8.0, 9.0],
+            "a": [1.0, 2.0, 3.0],
+            "b": [5.0, 5.0, 5.0],  # Constant
+            "c": [7.0, 8.0, 9.0],
         }
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -280,7 +279,7 @@ class TestStatisticalEdgeCases:
 
     def test_var_identical_values(self):
         """Test variance with identical values (should be 0)."""
-        data = {'a': [3.0, 3.0, 3.0], 'b': [7.0, 7.0, 7.0]}
+        data = {"a": [3.0, 3.0, 3.0], "b": [7.0, 7.0, 7.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -295,8 +294,8 @@ class TestTimeSeriesEdgeCases:
     def setup_method(self):
         """Create test data."""
         self.data = {
-            'a': [1.0, 2.0, 3.0, 4.0, 5.0],
-            'b': [10.0, 20.0, 30.0, 40.0, 50.0],
+            "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "b": [10.0, 20.0, 30.0, 40.0, 50.0],
         }
         self.jf_df = DataFrame(self.data)
         self.pd_df = pd.DataFrame(self.data)
@@ -338,7 +337,7 @@ class TestTimeSeriesEdgeCases:
         """Test pct_change when previous value is zero."""
         # NOTE: This will produce inf where we divide by zero
         # This matches pandas behavior
-        data = {'a': [0.0, 1.0, 2.0], 'b': [10.0, 0.0, 5.0]}
+        data = {"a": [0.0, 1.0, 2.0], "b": [10.0, 0.0, 5.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -355,9 +354,7 @@ class TestTimeSeriesEdgeCases:
         both_finite = jf_finite & pd_finite
         if both_finite.any():
             np.testing.assert_allclose(
-                jf_result.values[1:][both_finite],
-                pd_result.values[1:][both_finite],
-                rtol=1e-5
+                jf_result.values[1:][both_finite], pd_result.values[1:][both_finite], rtol=1e-5
             )
 
 
@@ -366,7 +363,7 @@ class TestConcatenationEdgeCases:
 
     def test_concat_single_dataframe(self):
         """Test concatenating a single DataFrame."""
-        data = {'a': [1, 2], 'b': [3, 4]}
+        data = {"a": [1, 2], "b": [3, 4]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -376,8 +373,8 @@ class TestConcatenationEdgeCases:
 
     def test_concat_many_dataframes(self):
         """Test concatenating many DataFrames."""
-        dfs_jf = [DataFrame({'a': [i], 'b': [i*10]}) for i in range(10)]
-        dfs_pd = [pd.DataFrame({'a': [i], 'b': [i*10]}) for i in range(10)]
+        dfs_jf = [DataFrame({"a": [i], "b": [i * 10]}) for i in range(10)]
+        dfs_pd = [pd.DataFrame({"a": [i], "b": [i * 10]}) for i in range(10)]
 
         jf_result = concat(dfs_jf, axis=0)
         pd_result = pd.concat(dfs_pd, axis=0, ignore_index=True)
@@ -385,10 +382,10 @@ class TestConcatenationEdgeCases:
 
     def test_concat_different_sizes(self):
         """Test concatenating DataFrames of different row counts."""
-        jf_df1 = DataFrame({'a': [1, 2], 'b': [3, 4]})
-        jf_df2 = DataFrame({'a': [5, 6, 7], 'b': [8, 9, 10]})
-        pd_df1 = pd.DataFrame({'a': [1, 2], 'b': [3, 4]})
-        pd_df2 = pd.DataFrame({'a': [5, 6, 7], 'b': [8, 9, 10]})
+        jf_df1 = DataFrame({"a": [1, 2], "b": [3, 4]})
+        jf_df2 = DataFrame({"a": [5, 6, 7], "b": [8, 9, 10]})
+        pd_df1 = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        pd_df2 = pd.DataFrame({"a": [5, 6, 7], "b": [8, 9, 10]})
 
         jf_result = concat([jf_df1, jf_df2], axis=0)
         pd_result = pd.concat([pd_df1, pd_df2], axis=0, ignore_index=True)
@@ -408,7 +405,7 @@ class TestKnownDifferences:
         Pandas uses NaN for undefined values (e.g., first row of diff()).
         JAXFrame now does the same (NaN is JIT-compatible in JAX).
         """
-        data = {'a': [1.0, 2.0, 3.0]}
+        data = {"a": [1.0, 2.0, 3.0]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -426,7 +423,7 @@ class TestKnownDifferences:
         Some dtypes may be converted to JAX-compatible types.
         """
         # Integer data might be converted to float for JAX compatibility
-        data = {'a': [1, 2, 3], 'b': [4, 5, 6]}
+        data = {"a": [1, 2, 3], "b": [4, 5, 6]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -441,7 +438,7 @@ class TestKnownDifferences:
         Comparison operations return numeric arrays (0/1) rather than
         pure boolean arrays, because JAX arrays use numeric types.
         """
-        data = {'a': [1, 2, 3], 'b': [4, 5, 6]}
+        data = {"a": [1, 2, 3], "b": [4, 5, 6]}
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
@@ -461,9 +458,9 @@ class TestKnownDifferences:
         Pandas supports rich index types (MultiIndex, DatetimeIndex, etc.).
         JAXFrame currently only supports simple integer indices for JIT compatibility.
         """
-        data = {'a': [1, 2, 3], 'b': [4, 5, 6]}
+        data = {"a": [1, 2, 3], "b": [4, 5, 6]}
         jf_df = DataFrame(data)
-        pd_df = pd.DataFrame(data, index=['x', 'y', 'z'])
+        pd_df = pd.DataFrame(data, index=["x", "y", "z"])
 
         # JAXFrame ignores non-integer indices in construction
         # This is a simplification for JAX compatibility
@@ -477,8 +474,8 @@ class TestComplexRealWorldScenarios:
     def test_normalization_workflow(self):
         """Test Z-score normalization workflow."""
         data = {
-            'feature1': [1.0, 2.0, 3.0, 4.0, 5.0],
-            'feature2': [10.0, 20.0, 30.0, 40.0, 50.0],
+            "feature1": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "feature2": [10.0, 20.0, 30.0, 40.0, 50.0],
         }
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -497,7 +494,7 @@ class TestComplexRealWorldScenarios:
     def test_outlier_clipping_workflow(self):
         """Test outlier detection and clipping."""
         data = {
-            'values': [1.0, 2.0, 3.0, 100.0, 4.0, 5.0],  # 100 is outlier
+            "values": [1.0, 2.0, 3.0, 100.0, 4.0, 5.0],  # 100 is outlier
         }
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -512,27 +509,28 @@ class TestComplexRealWorldScenarios:
     def test_feature_engineering_workflow(self):
         """Test creating new features from existing ones."""
         data = {
-            'price': [100.0, 105.0, 103.0, 108.0],
-            'quantity': [10.0, 12.0, 8.0, 15.0],
+            "price": [100.0, 105.0, 103.0, 108.0],
+            "quantity": [10.0, 12.0, 8.0, 15.0],
         }
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
         # Create total_value feature
-        jf_df_with_total = concat([
-            jf_df,
-            DataFrame({'total_value': (jf_df['price']._data * jf_df['quantity']._data).tolist()})
-        ], axis=1)
-
-        pd_df_with_total = pd_df.copy()
-        pd_df_with_total['total_value'] = pd_df['price'] * pd_df['quantity']
-
-        np.testing.assert_allclose(
-            jf_df_with_total.values,
-            pd_df_with_total.values,
-            rtol=1e-5
+        jf_df_with_total = concat(
+            [
+                jf_df,
+                DataFrame(
+                    {"total_value": (jf_df["price"]._data * jf_df["quantity"]._data).tolist()}
+                ),
+            ],
+            axis=1,
         )
 
+        pd_df_with_total = pd_df.copy()
+        pd_df_with_total["total_value"] = pd_df["price"] * pd_df["quantity"]
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+        np.testing.assert_allclose(jf_df_with_total.values, pd_df_with_total.values, rtol=1e-5)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

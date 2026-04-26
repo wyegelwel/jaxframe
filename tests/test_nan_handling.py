@@ -7,7 +7,6 @@ across all operations.
 
 import numpy as np
 import pandas as pd
-import jax.numpy as jnp
 import pytest
 
 from jaxframe import DataFrame
@@ -18,7 +17,7 @@ class TestNaNArithmetic:
 
     def test_addition_with_nan(self):
         """Test addition with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -35,7 +34,7 @@ class TestNaNArithmetic:
 
     def test_subtraction_with_nan(self):
         """Test subtraction with NaN values matches pandas."""
-        data = {'a': [10.0, np.nan, 30.0], 'b': [40.0, 50.0, np.nan]}
+        data = {"a": [10.0, np.nan, 30.0], "b": [40.0, 50.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -46,7 +45,7 @@ class TestNaNArithmetic:
 
     def test_multiplication_with_nan(self):
         """Test multiplication with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -57,7 +56,7 @@ class TestNaNArithmetic:
 
     def test_division_with_nan(self):
         """Test division with NaN values matches pandas."""
-        data = {'a': [10.0, np.nan, 30.0], 'b': [40.0, 50.0, np.nan]}
+        data = {"a": [10.0, np.nan, 30.0], "b": [40.0, 50.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -68,13 +67,13 @@ class TestNaNArithmetic:
 
     def test_power_with_nan(self):
         """Test power operations with NaN values matches pandas."""
-        data = {'a': [2.0, np.nan, 4.0], 'b': [1.0, 2.0, np.nan]}
+        data = {"a": [2.0, np.nan, 4.0], "b": [1.0, 2.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
-        jf_result = jf_df ** 2
-        pd_result = pd_df ** 2
+        jf_result = jf_df**2
+        pd_result = pd_df**2
         np.testing.assert_array_equal(jf_result.values, pd_result.values)
 
 
@@ -83,7 +82,7 @@ class TestNaNComparisons:
 
     def test_greater_than_with_nan(self):
         """Test > comparison with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -94,7 +93,7 @@ class TestNaNComparisons:
 
     def test_less_than_with_nan(self):
         """Test < comparison with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -105,7 +104,7 @@ class TestNaNComparisons:
 
     def test_equality_with_nan(self):
         """Test == comparison with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -117,7 +116,7 @@ class TestNaNComparisons:
 
     def test_nan_equality(self):
         """Test that NaN == NaN returns False (IEEE 754 behavior)."""
-        data = {'a': [np.nan, np.nan, 3.0]}
+        data = {"a": [np.nan, np.nan, 3.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -132,7 +131,7 @@ class TestNaNReductions:
 
     def test_sum_with_nan(self):
         """Test sum with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -141,18 +140,17 @@ class TestNaNReductions:
         pd_result = pd_df.sum()
 
         # Compare values (NaN propagation)
-        for col in ['a', 'b']:
+        for col in ["a", "b"]:
             if np.isnan(pd_result[col]):
                 assert np.isnan(jf_result._data[jf_result._index.tolist().index(col)])
             else:
                 np.testing.assert_allclose(
-                    jf_result._data[jf_result._index.tolist().index(col)],
-                    pd_result[col]
+                    jf_result._data[jf_result._index.tolist().index(col)], pd_result[col]
                 )
 
     def test_mean_with_nan(self):
         """Test mean with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -160,18 +158,17 @@ class TestNaNReductions:
         jf_result = jf_df.mean()
         pd_result = pd_df.mean()
 
-        for col in ['a', 'b']:
+        for col in ["a", "b"]:
             if np.isnan(pd_result[col]):
                 assert np.isnan(jf_result._data[jf_result._index.tolist().index(col)])
             else:
                 np.testing.assert_allclose(
-                    jf_result._data[jf_result._index.tolist().index(col)],
-                    pd_result[col]
+                    jf_result._data[jf_result._index.tolist().index(col)], pd_result[col]
                 )
 
     def test_min_with_nan(self):
         """Test min with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -179,18 +176,17 @@ class TestNaNReductions:
         jf_result = jf_df.min()
         pd_result = pd_df.min()
 
-        for col in ['a', 'b']:
+        for col in ["a", "b"]:
             if np.isnan(pd_result[col]):
                 assert np.isnan(jf_result._data[jf_result._index.tolist().index(col)])
             else:
                 np.testing.assert_allclose(
-                    jf_result._data[jf_result._index.tolist().index(col)],
-                    pd_result[col]
+                    jf_result._data[jf_result._index.tolist().index(col)], pd_result[col]
                 )
 
     def test_max_with_nan(self):
         """Test max with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -198,18 +194,17 @@ class TestNaNReductions:
         jf_result = jf_df.max()
         pd_result = pd_df.max()
 
-        for col in ['a', 'b']:
+        for col in ["a", "b"]:
             if np.isnan(pd_result[col]):
                 assert np.isnan(jf_result._data[jf_result._index.tolist().index(col)])
             else:
                 np.testing.assert_allclose(
-                    jf_result._data[jf_result._index.tolist().index(col)],
-                    pd_result[col]
+                    jf_result._data[jf_result._index.tolist().index(col)], pd_result[col]
                 )
 
     def test_std_with_nan(self):
         """Test std with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0, 4.0, 5.0], 'b': [4.0, 5.0, 6.0, np.nan, 8.0]}
+        data = {"a": [1.0, np.nan, 3.0, 4.0, 5.0], "b": [4.0, 5.0, 6.0, np.nan, 8.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -217,14 +212,12 @@ class TestNaNReductions:
         jf_result = jf_df.std()
         pd_result = pd_df.std()
 
-        for col in ['a', 'b']:
+        for col in ["a", "b"]:
             if np.isnan(pd_result[col]):
                 assert np.isnan(jf_result._data[jf_result._index.tolist().index(col)])
             else:
                 np.testing.assert_allclose(
-                    jf_result._data[jf_result._index.tolist().index(col)],
-                    pd_result[col],
-                    rtol=1e-5
+                    jf_result._data[jf_result._index.tolist().index(col)], pd_result[col], rtol=1e-5
                 )
 
 
@@ -233,7 +226,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_shift_creates_nan(self):
         """Test that shift() creates NaN values by default (matching pandas)."""
-        data = {'a': [1.0, 2.0, 3.0], 'b': [4.0, 5.0, 6.0]}
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -245,7 +238,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_shift_with_nan_data(self):
         """Test shift with existing NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -257,7 +250,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_shift_negative_with_nan(self):
         """Test negative shift with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0, 4.0], 'b': [5.0, 6.0, np.nan, 8.0]}
+        data = {"a": [1.0, np.nan, 3.0, 4.0], "b": [5.0, 6.0, np.nan, 8.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -269,7 +262,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_diff_creates_nan(self):
         """Test that diff() creates NaN for first row (matching pandas)."""
-        data = {'a': [1.0, 2.0, 3.0], 'b': [4.0, 5.0, 6.0]}
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -281,7 +274,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_diff_with_nan_data(self):
         """Test diff with existing NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0, 4.0], 'b': [5.0, 6.0, np.nan, 8.0]}
+        data = {"a": [1.0, np.nan, 3.0, 4.0], "b": [5.0, 6.0, np.nan, 8.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -293,7 +286,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_diff_periods_with_nan(self):
         """Test diff with periods > 1 and NaN values matches pandas."""
-        data = {'a': [1.0, 2.0, np.nan, 4.0, 5.0], 'b': [6.0, np.nan, 8.0, 9.0, 10.0]}
+        data = {"a": [1.0, 2.0, np.nan, 4.0, 5.0], "b": [6.0, np.nan, 8.0, 9.0, 10.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -305,7 +298,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_pct_change_creates_nan(self):
         """Test that pct_change() creates NaN for first row (matching pandas)."""
-        data = {'a': [1.0, 2.0, 3.0], 'b': [4.0, 5.0, 6.0]}
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -317,7 +310,7 @@ class TestNaNTimeSeriesOperations:
 
     def test_pct_change_with_nan_data(self):
         """Test pct_change with existing NaN values matches pandas (with fill_method=None)."""
-        data = {'a': [1.0, np.nan, 3.0, 4.0], 'b': [5.0, 6.0, np.nan, 8.0]}
+        data = {"a": [1.0, np.nan, 3.0, 4.0], "b": [5.0, 6.0, np.nan, 8.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -334,7 +327,7 @@ class TestNaNIndexing:
 
     def test_iloc_with_nan(self):
         """Test iloc with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -345,8 +338,8 @@ class TestNaNIndexing:
         np.testing.assert_array_equal(jf_result.values, pd_result.values)
 
         # Select columns
-        jf_result = jf_df[['a']]
-        pd_result = pd_df[['a']]
+        jf_result = jf_df[["a"]]
+        pd_result = pd_df[["a"]]
         np.testing.assert_array_equal(jf_result.values, pd_result.values)
 
     # TODO: Re-enable once Series supports comparison operators
@@ -370,7 +363,7 @@ class TestNaNStatisticalOperations:
 
     def test_var_with_nan(self):
         """Test variance with NaN values matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0, 4.0, 5.0], 'b': [4.0, 5.0, 6.0, np.nan, 8.0]}
+        data = {"a": [1.0, np.nan, 3.0, 4.0, 5.0], "b": [4.0, 5.0, 6.0, np.nan, 8.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -378,14 +371,12 @@ class TestNaNStatisticalOperations:
         jf_result = jf_df.var()
         pd_result = pd_df.var()
 
-        for col in ['a', 'b']:
+        for col in ["a", "b"]:
             if np.isnan(pd_result[col]):
                 assert np.isnan(jf_result._data[jf_result._index.tolist().index(col)])
             else:
                 np.testing.assert_allclose(
-                    jf_result._data[jf_result._index.tolist().index(col)],
-                    pd_result[col],
-                    rtol=1e-5
+                    jf_result._data[jf_result._index.tolist().index(col)], pd_result[col], rtol=1e-5
                 )
 
     # TODO: Add cumsum and cumprod tests once those methods are implemented
@@ -420,23 +411,23 @@ class TestNaNMixedDtypes:
     def test_nan_in_different_dtype_blocks(self):
         """Test NaN handling when columns have different dtypes."""
         data = {
-            'int32_col': np.array([1, 2, 3], dtype=np.int32),
-            'float32_col': np.array([1.0, np.nan, 3.0], dtype=np.float32),
-            'float64_col': np.array([4.0, 5.0, np.nan], dtype=np.float64),
+            "int32_col": np.array([1, 2, 3], dtype=np.int32),
+            "float32_col": np.array([1.0, np.nan, 3.0], dtype=np.float32),
+            "float64_col": np.array([4.0, 5.0, np.nan], dtype=np.float64),
         }
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
 
         # Verify dtypes are preserved
-        assert jf_df.dtypes['int32_col'] == np.dtype('int32')
-        assert jf_df.dtypes['float32_col'] == np.dtype('float32')
-        assert jf_df.dtypes['float64_col'] == np.dtype('float64')
+        assert jf_df.dtypes["int32_col"] == np.dtype("int32")
+        assert jf_df.dtypes["float32_col"] == np.dtype("float32")
+        assert jf_df.dtypes["float64_col"] == np.dtype("float64")
 
         # Verify values match
         np.testing.assert_array_equal(
-            jf_df[['float32_col', 'float64_col']].values,
-            pd_df[['float32_col', 'float64_col']].values
+            jf_df[["float32_col", "float64_col"]].values,
+            pd_df[["float32_col", "float64_col"]].values,
         )
 
     def test_arithmetic_with_nan_across_dtypes(self):
@@ -444,8 +435,8 @@ class TestNaNMixedDtypes:
         # Note: JAX may truncate float64 to float32 depending on configuration
         # This test verifies NaN preservation, not exact dtype preservation
         data = {
-            'col_a': [1.0, np.nan, 3.0],
-            'col_b': [4.0, 5.0, np.nan],
+            "col_a": [1.0, np.nan, 3.0],
+            "col_b": [4.0, 5.0, np.nan],
         }
 
         jf_df = DataFrame(data)
@@ -463,7 +454,7 @@ class TestNaNWhereOperation:
 
     def test_where_with_nan_condition(self):
         """Test where with NaN in condition matches pandas."""
-        data = {'a': [1.0, 2.0, 3.0], 'b': [4.0, 5.0, 6.0]}
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -479,7 +470,7 @@ class TestNaNWhereOperation:
 
     def test_where_with_nan_in_data(self):
         """Test where with NaN in original data matches pandas."""
-        data = {'a': [1.0, np.nan, 3.0], 'b': [4.0, 5.0, np.nan]}
+        data = {"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -494,7 +485,7 @@ class TestNaNWhereOperation:
 
     def test_where_with_nan_fill_value(self):
         """Test where with NaN as fill_value matches pandas."""
-        data = {'a': [1.0, 2.0, 3.0], 'b': [4.0, 5.0, 6.0]}
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
 
         jf_df = DataFrame(data)
         pd_df = pd.DataFrame(data)
@@ -508,5 +499,5 @@ class TestNaNWhereOperation:
         np.testing.assert_array_equal(jf_result.values, pd_result.values)
 
 
-if __name__ == '__main__':
-    pytest.main([__file__, '-v'])
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

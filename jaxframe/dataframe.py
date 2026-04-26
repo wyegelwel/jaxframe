@@ -2070,6 +2070,11 @@ class Series:
     def __ne__(self, other):
         return self._binop(other, jnp.not_equal)
 
+    @property
+    def dt(self):
+        """Datetime accessor for Series containing datetime64 data."""
+        return _DatetimeAccessor(self._data)
+
     def __repr__(self):
         """String representation."""
         lines = [f"Series(name={self._name}, shape={len(self._data)})"]
@@ -2079,6 +2084,51 @@ class Series:
         if len(self._data) > n_show:
             lines.append("  ...")
         return "\n".join(lines)
+
+
+class _DatetimeAccessor:
+    """Accessor for datetime64 Series data. Extracts date components as numpy arrays."""
+
+    def __init__(self, data):
+        # Ensure we have numpy datetime64 data
+        self._data = np.asarray(data)
+        if not np.issubdtype(self._data.dtype, np.datetime64):
+            raise AttributeError("Can only use .dt accessor with datetime data")
+
+    @property
+    def year(self):
+        return self._data.astype("datetime64[Y]").astype(int) + 1970
+
+    @property
+    def month(self):
+        return (self._data.astype("datetime64[M]").astype(int) % 12) + 1
+
+    @property
+    def day(self):
+        return (self._data.astype("datetime64[D]") - self._data.astype("datetime64[M]")).astype(
+            int
+        ) + 1
+
+    @property
+    def hour(self):
+        return (self._data.astype("datetime64[h]") - self._data.astype("datetime64[D]")).astype(int)
+
+    @property
+    def minute(self):
+        return (self._data.astype("datetime64[m]") - self._data.astype("datetime64[h]")).astype(int)
+
+    @property
+    def second(self):
+        return (self._data.astype("datetime64[s]") - self._data.astype("datetime64[m]")).astype(int)
+
+    @property
+    def dayofweek(self):
+        # Monday=0, Sunday=6 — datetime64 epoch (1970-01-01) was Thursday (3)
+        return (self._data.astype("datetime64[D]").astype(int) - 4) % 7
+
+    @property
+    def date(self):
+        return self._data.astype("datetime64[D]")
 
 
 # ========================================

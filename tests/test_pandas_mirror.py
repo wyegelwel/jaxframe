@@ -756,3 +756,91 @@ class TestGroupBy:
             pd_result.values.astype(np.float32),
             rtol=1e-5,
         )
+
+
+# ============================
+# DateTime / .dt accessor (Sessions 12-13)
+# ============================
+
+
+class TestDatetime:
+    """Test datetime index and .dt accessor."""
+
+    def test_datetime_index_creation(self):
+        """Create DataFrame with datetime index from strings."""
+        from jaxframe import DataFrame
+
+        dates = pd.date_range("2024-01-01", periods=3, freq="D")
+        data = {"val": [1.0, 2.0, 3.0]}
+        pdf = pd.DataFrame(data, index=dates)
+        jdf = DataFrame(data, index=dates)
+        assert jdf.shape == pdf.shape
+        np.testing.assert_allclose(np.array(jdf.values), pdf.values.astype(np.float32), rtol=1e-5)
+
+    def test_dt_year(self):
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-15", periods=4, freq="ME")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        np.testing.assert_array_equal(np.asarray(js.dt.year), ps.dt.year.values)
+
+    def test_dt_month(self):
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-15", periods=4, freq="ME")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        np.testing.assert_array_equal(np.asarray(js.dt.month), ps.dt.month.values)
+
+    def test_dt_day(self):
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-15", periods=4, freq="ME")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        np.testing.assert_array_equal(np.asarray(js.dt.day), ps.dt.day.values)
+
+    def test_dt_hour(self):
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-01 08:30:00", periods=3, freq="h")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        np.testing.assert_array_equal(np.asarray(js.dt.hour), ps.dt.hour.values)
+
+    def test_dt_minute(self):
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-01 08:30:00", periods=3, freq="h")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        np.testing.assert_array_equal(np.asarray(js.dt.minute), ps.dt.minute.values)
+
+    def test_dt_second(self):
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-01 08:30:45", periods=3, freq="h")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        np.testing.assert_array_equal(np.asarray(js.dt.second), ps.dt.second.values)
+
+    def test_dt_dayofweek(self):
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-01", periods=7, freq="D")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        np.testing.assert_array_equal(np.asarray(js.dt.dayofweek), ps.dt.dayofweek.values)
+
+    def test_dt_date(self):
+        """dt.date returns date portion as datetime64[D]."""
+        from jaxframe import Series
+
+        dates = pd.date_range("2024-01-01 08:30:00", periods=3, freq="D")
+        ps = pd.Series(dates)
+        js = Series(dates)
+        # Compare as strings since date types may differ
+        pd_dates = ps.dt.date.values.astype("datetime64[D]")
+        jf_dates = np.asarray(js.dt.date).astype("datetime64[D]")
+        np.testing.assert_array_equal(jf_dates, pd_dates)

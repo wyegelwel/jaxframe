@@ -1277,6 +1277,35 @@ class DataFrame:
                 data[col] = val
         return DataFrame(data, index=self._index)
 
+    def astype(self, dtype):
+        """Cast all numeric columns to dtype. JIT-compatible."""
+        target = jnp.dtype(dtype)
+        return self._apply_blockwise(lambda block: block.astype(target))
+
+    def select_dtypes(self, include=None, exclude=None):
+        """Select columns by dtype. Not JIT-compatible (metadata op)."""
+        include_set = {np.dtype(d) for d in include} if include else None
+        exclude_set = {np.dtype(d) for d in exclude} if exclude else set()
+
+        keep_cols = []
+        for col in self._column_order:
+            if col in self._column_to_block:
+                dtype, _ = self._column_to_block[col]
+                if include_set and dtype not in include_set:
+                    continue
+                if dtype in exclude_set:
+                    continue
+                keep_cols.append(col)
+            elif col in self._object_data:
+                obj_dtype = np.dtype("object")
+                if include_set and obj_dtype not in include_set:
+                    continue
+                if obj_dtype in exclude_set:
+                    continue
+                keep_cols.append(col)
+
+        return self[keep_cols]
+
     # ========================================
     # Apply
     # ========================================

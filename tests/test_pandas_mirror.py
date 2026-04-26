@@ -1265,3 +1265,47 @@ class TestIndexOps:
         jdf = DataFrame(data, index=np.array([2, 0, 1]))
         result = jdf.sort_index(ascending=False)
         np.testing.assert_array_equal(result._index, np.array([2, 1, 0]))
+
+
+# ============================
+# Session 19: astype, select_dtypes
+# ============================
+
+
+class TestTypeOps:
+    def test_astype_float32(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        jdf = DataFrame(data)
+        result = jdf.astype("float32")
+        for block in result._dtype_blocks.values():
+            assert block.dtype == np.float32
+
+    def test_astype_int32(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        jdf = DataFrame(data)
+        result = jdf.astype("int32")
+        for block in result._dtype_blocks.values():
+            assert block.dtype == np.int32
+
+    def test_select_dtypes_include(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0], "b": [3, 4], "c": ["x", "y"]}
+        jdf = DataFrame(data)
+        result = jdf.select_dtypes(include=["float64"])
+        assert "a" in result._column_order
+        assert "b" not in result._column_order
+        assert "c" not in result._column_order
+
+    def test_select_dtypes_exclude(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0], "b": [3, 4], "c": ["x", "y"]}
+        jdf = DataFrame(data)
+        result = jdf.select_dtypes(exclude=["object"])
+        assert "c" not in result._column_order
+        assert "a" in result._column_order

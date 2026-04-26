@@ -49,6 +49,26 @@ Pandas vs jaxframe (eager and JIT) at various data sizes. JaxFrame+JIT should be
 | `tests/test_jax_transforms.py` | JIT/grad compatibility matrix |
 | `tests/test_benchmarks.py` | Performance comparison runner |
 
+## Non-Differentiable Operations
+
+All ops are JIT-compatible. The following are **not** differentiable (`jax.grad`), with reasons:
+
+| Operation | Reason |
+|-----------|--------|
+| `min`, `max` | Non-smooth (gradient undefined at argmin/argmax) |
+| `median`, `quantile` | Non-smooth (sort-based, gradient undefined at boundaries) |
+| `isna`, `notna`, `isnull`, `notnull` | Boolean output — not a real-valued function |
+| `count` | Integer output (sum of booleans) — not real-valued |
+| `sort_values`, `nlargest`, `nsmallest` | Permutation-based (argsort) — discrete, not differentiable |
+| `groupby.min`, `groupby.max` | Same as min/max — non-smooth |
+| `groupby.count` | Same as count — integer output |
+| `groupby.prod` | JAX limitation: `scatter_mul` gradients require `unique_indices=True` |
+| `groupby.first`, `groupby.last` | Index-based gather via segment_min/max on indices — discrete |
+
+Everything else (sum, mean, std, var, arithmetic, clip, where, fillna, cumsum, cumprod, shift, apply, reverse ops, groupby.sum/mean/std/var, transform) **is differentiable**.
+
+When adding new ops, update this table. If an op is non-differentiable, document why.
+
 ## Tools
 
 - **Package manager**: uv (`uv sync`, `uv run`)

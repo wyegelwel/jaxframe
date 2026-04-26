@@ -416,3 +416,20 @@ NLARGEST_CASES = [
 @pytest.mark.parametrize("name,data,op", NLARGEST_CASES, ids=[c[0] for c in NLARGEST_CASES])
 def test_nlargest(name, data, op):
     run_equiv(data, op)
+
+
+# ============================
+# Column manipulation (Session 6)
+# ============================
+
+COLUMN_CASES = [
+    ("drop_col", NUMERIC_3COL, lambda df: df.drop(columns=["b"])),
+    ("drop_multi", NUMERIC_3COL, lambda df: df.drop(columns=["a", "c"])),
+    ("rename_cols", NUMERIC_2COL, lambda df: df.rename(columns={"a": "x", "b": "y"})),
+    ("assign_new", NUMERIC_2COL, lambda df: df.assign(c=df["a"] + df["b"])),
+]
+
+
+@pytest.mark.parametrize("name,data,op", COLUMN_CASES, ids=[c[0] for c in COLUMN_CASES])
+def test_column_ops(name, data, op):
+    run_equiv(data, op)

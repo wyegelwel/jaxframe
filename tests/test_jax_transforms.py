@@ -53,6 +53,9 @@ OPERATIONS = [
     ("quantile_sum", lambda df: df.quantile(0.5).sum(), True, False),
     ("nlargest_sum", lambda df: df.nlargest(2, "a").sum(axis=None), True, False),
     ("nsmallest_sum", lambda df: df.nsmallest(2, "a").sum(axis=None), True, False),
+    # Column manipulation (Session 6)
+    ("drop_sum", lambda df: df.drop(columns=["a"]).sum(axis=None), True, True),
+    ("rename_sum", lambda df: df.rename(columns={"a": "x"}).sum(axis=None), True, True),
 ]
 
 

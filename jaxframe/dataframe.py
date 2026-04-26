@@ -977,6 +977,79 @@ class DataFrame:
         return pd.DataFrame(stats)
 
     # ========================================
+    # Column manipulation
+    # ========================================
+
+    def drop(self, columns=None, **kwargs):
+        """Drop columns. Returns new DataFrame via _from_parts. JIT-compatible."""
+        if columns is None:
+            columns = kwargs.get("labels", [])
+        if isinstance(columns, str):
+            columns = [columns]
+        drop_set = set(columns)
+        new_order = [c for c in self._column_order if c not in drop_set]
+        # Rebuild blocks keeping only remaining columns
+        new_blocks = {}
+        new_col_to_block = {}
+        col_counts = {}  # dtype -> next index
+        for col in new_order:
+            if col in self._column_to_block:
+                old_dtype, old_idx = self._column_to_block[col]
+                block = self._dtype_blocks[old_dtype]
+                col_data = block[:, old_idx : old_idx + 1]
+                if old_dtype not in new_blocks:
+                    new_blocks[old_dtype] = []
+                    col_counts[old_dtype] = 0
+                new_blocks[old_dtype].append(col_data)
+                new_col_to_block[col] = (old_dtype, col_counts[old_dtype])
+                col_counts[old_dtype] += 1
+        # Concatenate column slices into blocks
+        final_blocks = {dt: jnp.concatenate(cols, axis=1) for dt, cols in new_blocks.items()}
+        new_object = {k: v for k, v in self._object_data.items() if k not in drop_set}
+        return DataFrame._from_parts(
+            dtype_blocks=final_blocks,
+            column_to_block=new_col_to_block,
+            object_data=new_object,
+            index=self._index,
+            column_order=new_order,
+        )
+
+    def rename(self, columns=None, **kwargs):
+        """Rename columns. JIT-compatible (metadata-only change)."""
+        if columns is None:
+            return self.copy()
+        mapping = columns
+        new_order = [mapping.get(c, c) for c in self._column_order]
+        new_col_to_block = {mapping.get(c, c): v for c, v in self._column_to_block.items()}
+        new_object = {mapping.get(k, k): v for k, v in self._object_data.items()}
+        return DataFrame._from_parts(
+            dtype_blocks=self._dtype_blocks,
+            column_to_block=new_col_to_block,
+            object_data=new_object,
+            index=self._index,
+            column_order=new_order,
+        )
+
+    def assign(self, **kwargs):
+        """Assign new columns. Not JIT-compatible (creates via __init__)."""
+        # Build data dict from current columns + new ones
+        data = {}
+        for col in self._column_order:
+            if col in self._column_to_block:
+                dtype, idx = self._column_to_block[col]
+                data[col] = self._dtype_blocks[dtype][:, idx]
+            elif col in self._object_data:
+                data[col] = self._object_data[col]
+        for col, val in kwargs.items():
+            if isinstance(val, Series):
+                data[col] = val._data
+            elif hasattr(val, "__jax_array__") or hasattr(val, "shape"):
+                data[col] = val
+            else:
+                data[col] = val
+        return DataFrame(data, index=self._index)
+
+    # ========================================
     # Pandas interop & copy
     # ========================================
 

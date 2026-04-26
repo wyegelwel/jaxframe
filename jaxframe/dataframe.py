@@ -938,6 +938,45 @@ class DataFrame:
         )
 
     # ========================================
+    # Describe & quantile
+    # ========================================
+
+    def quantile(self, q=0.5):
+        """Compute quantile along axis 0. JIT-compatible."""
+        data = self.values
+        result = jnp.nanquantile(data, q, axis=0)
+        return Series(result, index=np.array(self._numeric_cols), name=q)
+
+    def nlargest(self, n, columns):
+        """Return top n rows by column. JIT-compatible."""
+        return self.sort_values(columns, ascending=False).head(n)
+
+    def nsmallest(self, n, columns):
+        """Return bottom n rows by column. JIT-compatible."""
+        return self.sort_values(columns, ascending=True).head(n)
+
+    def describe(self):
+        """Generate descriptive statistics. Not JIT-compatible (returns mixed)."""
+        import pandas as pd
+
+        data = self.values
+        cols = self._numeric_cols
+        stats = {}
+        for i, col in enumerate(cols):
+            col_data = data[:, i]
+            stats[col] = {
+                "count": float(jnp.sum(~jnp.isnan(col_data))),
+                "mean": float(jnp.nanmean(col_data)),
+                "std": float(jnp.nanstd(col_data, ddof=1)),
+                "min": float(jnp.nanmin(col_data)),
+                "25%": float(jnp.nanquantile(col_data, 0.25)),
+                "50%": float(jnp.nanquantile(col_data, 0.50)),
+                "75%": float(jnp.nanquantile(col_data, 0.75)),
+                "max": float(jnp.nanmax(col_data)),
+            }
+        return pd.DataFrame(stats)
+
+    # ========================================
     # Pandas interop & copy
     # ========================================
 

@@ -388,3 +388,31 @@ SORT_CASES = [
 @pytest.mark.parametrize("name,data,op", SORT_CASES, ids=[c[0] for c in SORT_CASES])
 def test_sorting(name, data, op):
     run_equiv(data, op)
+
+
+# ============================
+# Describe & quantile (Session 5)
+# ============================
+
+QUANTILE_CASES = [
+    ("quantile_50", NUMERIC_3COL, lambda df: df.quantile(0.5)),
+    ("quantile_25", NUMERIC_3COL, lambda df: df.quantile(0.25)),
+    ("quantile_75", NUMERIC_3COL, lambda df: df.quantile(0.75)),
+]
+
+
+@pytest.mark.parametrize("name,data,op", QUANTILE_CASES, ids=[c[0] for c in QUANTILE_CASES])
+def test_quantile(name, data, op):
+    run_equiv(data, op)
+
+
+NLARGEST_CASES = [
+    ("nlargest_2_a", NUMERIC_2COL, lambda df: df.nlargest(2, "a")),
+    ("nsmallest_2_a", NUMERIC_2COL, lambda df: df.nsmallest(2, "a")),
+    ("nlargest_3_b", NUMERIC_3COL, lambda df: df.nlargest(3, "b")),
+]
+
+
+@pytest.mark.parametrize("name,data,op", NLARGEST_CASES, ids=[c[0] for c in NLARGEST_CASES])
+def test_nlargest(name, data, op):
+    run_equiv(data, op)

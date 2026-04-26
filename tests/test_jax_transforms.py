@@ -49,6 +49,10 @@ OPERATIONS = [
     ("copy_sum", lambda df: df.copy().sum(axis=None), True, True),
     # Sorting (Session 4) — argsort not differentiable
     ("sort_sum", lambda df: df.sort_values("a").sum(axis=None), True, False),
+    # Describe & quantile (Session 5)
+    ("quantile_sum", lambda df: df.quantile(0.5).sum(), True, False),
+    ("nlargest_sum", lambda df: df.nlargest(2, "a").sum(axis=None), True, False),
+    ("nsmallest_sum", lambda df: df.nsmallest(2, "a").sum(axis=None), True, False),
 ]
 
 

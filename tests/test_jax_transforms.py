@@ -58,6 +58,10 @@ OPERATIONS = [
     ("rename_sum", lambda df: df.rename(columns={"a": "x"}).sum(axis=None), True, True),
     # Apply (Session 7)
     ("apply_sum", lambda df: df.apply(jnp.sum, axis=0).sum(), True, True),
+    # Reverse operators (Session 8)
+    ("radd_sum", lambda df: (10 + df).sum(axis=None), True, True),
+    ("rsub_sum", lambda df: (100 - df).sum(axis=None), True, True),
+    ("rmul_sum", lambda df: (3 * df).sum(axis=None), True, True),
 ]
 
 

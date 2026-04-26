@@ -563,6 +563,28 @@ class DataFrame:
         """Element-wise power (JIT-compatible with type promotion)."""
         return self._apply_elementwise(other, jnp.power, "power")
 
+    # Reverse operators
+    def __radd__(self, other):
+        return self._apply_elementwise(other, lambda a, b: jnp.add(b, a), "radd")
+
+    def __rsub__(self, other):
+        return self._apply_elementwise(other, lambda a, b: jnp.subtract(b, a), "rsub")
+
+    def __rmul__(self, other):
+        return self._apply_elementwise(other, lambda a, b: jnp.multiply(b, a), "rmul")
+
+    def __rtruediv__(self, other):
+        return self._apply_elementwise(other, lambda a, b: jnp.true_divide(b, a), "rtruediv")
+
+    def __rfloordiv__(self, other):
+        return self._apply_elementwise(other, lambda a, b: jnp.floor_divide(b, a), "rfloordiv")
+
+    def __rmod__(self, other):
+        return self._apply_elementwise(other, lambda a, b: jnp.mod(b, a), "rmod")
+
+    def __rpow__(self, other):
+        return self._apply_elementwise(other, lambda a, b: jnp.power(b, a), "rpow")
+
     def __matmul__(self, other: Union[jnp.ndarray, "DataFrame"]) -> Union[jnp.ndarray, "DataFrame"]:
         """Matrix multiplication (JIT-compatible with type promotion)."""
         if not self._dtype_blocks:
@@ -1969,6 +1991,28 @@ class Series:
 
     def __neg__(self):
         return Series(jnp.negative(self._data), index=self._index, name=self._name)
+
+    # Reverse operators
+    def __radd__(self, other):
+        return self._binop(other, lambda a, b: jnp.add(b, a))
+
+    def __rsub__(self, other):
+        return self._binop(other, lambda a, b: jnp.subtract(b, a))
+
+    def __rmul__(self, other):
+        return self._binop(other, lambda a, b: jnp.multiply(b, a))
+
+    def __rtruediv__(self, other):
+        return self._binop(other, lambda a, b: jnp.true_divide(b, a))
+
+    def __rfloordiv__(self, other):
+        return self._binop(other, lambda a, b: jnp.floor_divide(b, a))
+
+    def __rmod__(self, other):
+        return self._binop(other, lambda a, b: jnp.mod(b, a))
+
+    def __rpow__(self, other):
+        return self._binop(other, lambda a, b: jnp.power(b, a))
 
     # Comparison operators
     def __gt__(self, other):

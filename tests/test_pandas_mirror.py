@@ -449,3 +449,23 @@ APPLY_CASES = [
 @pytest.mark.parametrize("name,data,op", APPLY_CASES, ids=[c[0] for c in APPLY_CASES])
 def test_apply(name, data, op):
     run_equiv(data, op)
+
+
+# ============================
+# Reverse operators (Session 8)
+# ============================
+
+REVERSE_OP_CASES = [
+    ("radd", NUMERIC_2COL, lambda df: 10 + df),
+    ("rsub", NUMERIC_2COL, lambda df: 100 - df),
+    ("rmul", NUMERIC_2COL, lambda df: 3 * df),
+    ("rtruediv", NUMERIC_2COL, lambda df: 100.0 / df),
+    ("rfloordiv", NUMERIC_2COL, lambda df: 100 // df),
+    ("rmod", NUMERIC_2COL, lambda df: 100 % df),
+    ("rpow", NUMERIC_2COL, lambda df: 2**df),
+]
+
+
+@pytest.mark.parametrize("name,data,op", REVERSE_OP_CASES, ids=[c[0] for c in REVERSE_OP_CASES])
+def test_reverse_ops(name, data, op):
+    run_equiv(data, op)

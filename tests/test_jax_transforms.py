@@ -74,7 +74,7 @@ GROUPBY_OPS = [
     ("gb_var", lambda sgb: sgb.var().values.sum(), True, True),
     ("gb_std", lambda sgb: sgb.std().values.sum(), True, True),
     ("gb_count", lambda sgb: sgb.count().values.sum(), True, False),
-    ("gb_prod", lambda sgb: sgb.prod().values.sum(), True, False),
+    ("gb_prod", lambda sgb: sgb.prod().values.sum(), True, False),  # JAX: scatter_mul grad unimplemented
     ("gb_first", lambda sgb: sgb.first().values.sum(), True, False),
     ("gb_last", lambda sgb: sgb.last().values.sum(), True, False),
     ("gb_transform_sum", lambda sgb: sgb.transform("sum").values.sum(), True, True),

@@ -8,7 +8,7 @@ JAXFrame provides DataFrames powered by JAX, enabling:
 - Familiar pandas-like interface
 """
 
-from jaxframe.dataframe import DataFrame, Series, concat
+from jaxframe.dataframe import DataFrame, Series, concat, read_csv
 
 __version__ = "0.1.0"
-__all__ = ["DataFrame", "Series", "concat"]
+__all__ = ["DataFrame", "Series", "concat", "read_csv"]

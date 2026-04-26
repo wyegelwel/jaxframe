@@ -1309,3 +1309,35 @@ class TestTypeOps:
         result = jdf.select_dtypes(exclude=["object"])
         assert "c" not in result._column_order
         assert "a" in result._column_order
+
+
+# ============================
+# Session 20: I/O — to_csv, read_csv
+# ============================
+
+
+class TestIO:
+    def test_to_csv_and_read_csv(self, tmp_path):
+        from jaxframe import DataFrame, read_csv
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        jdf = DataFrame(data)
+        path = str(tmp_path / "test.csv")
+        jdf.to_csv(path)
+        result = read_csv(path)
+        np.testing.assert_allclose(
+            np.asarray(result.values),
+            np.asarray(jdf.values),
+            rtol=1e-5,
+        )
+
+    def test_to_csv_index(self, tmp_path):
+        from jaxframe import DataFrame, read_csv
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        jdf = DataFrame(data, index=np.array([10, 20, 30]))
+        path = str(tmp_path / "test_idx.csv")
+        jdf.to_csv(path, index=True)
+        # Just verify it writes without error
+        result = read_csv(path, index_col=0)
+        assert result.shape == (3, 2)

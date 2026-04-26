@@ -104,6 +104,14 @@ def concat(dataframes: list["DataFrame"], axis: int = 0):
         raise ValueError(f"axis must be 0 or 1, got {axis}")
 
 
+def read_csv(path, index_col=None, **kwargs):
+    """Read a CSV file into a DataFrame. Not JIT-compatible (I/O)."""
+    import pandas as pd
+
+    pdf = pd.read_csv(path, index_col=index_col, **kwargs)
+    return DataFrame.from_pandas(pdf)
+
+
 @dataclass
 class DataFrame:
     """
@@ -1424,6 +1432,10 @@ class DataFrame:
             index=self._index.copy(),
             column_order=list(self._column_order),
         )
+
+    def to_csv(self, path, index=False, **kwargs):
+        """Write DataFrame to CSV file. Not JIT-compatible (I/O)."""
+        self.to_pandas().to_csv(path, index=index, **kwargs)
 
     # ========================================
     # Time series operations

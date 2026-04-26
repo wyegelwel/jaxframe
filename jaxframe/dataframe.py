@@ -1100,7 +1100,7 @@ class DataFrame:
         )
 
     def sort_index(self, ascending=True):
-        """Sort by index. Not JIT-compatible (uses np.argsort on index)."""
+        """Sort by index. JIT-compatible (index is static aux data)."""
         order = np.argsort(self._index)
         if not ascending:
             order = order[::-1]

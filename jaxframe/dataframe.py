@@ -199,9 +199,9 @@ _JAX_COMPAT = [
     ("from_pandas", False, False, "I/O — outside JAX"),
     ("to_csv", False, False, "I/O — outside JAX"),
     ("to_numpy", False, False, "Converts to numpy"),
-    ("nunique", False, False, "Uses np.unique (eager)"),
-    ("mode", False, False, "Uses np.unique (eager)"),
-    ("value_counts", False, False, "Uses np.unique (eager)"),
+    ("nunique", False, False, "Uses jnp.unique (eager, not traceable)"),
+    ("mode", False, False, "Uses jnp.unique (eager, not traceable)"),
+    ("value_counts", False, False, "Uses jnp.unique (eager, not traceable)"),
     ("rolling(str)", False, False, "Time-based: variable window sizes"),
 ]
 
@@ -952,15 +952,15 @@ class DataFrame:
         return self._apply_blockwise(_check_block)
 
     def nunique(self, axis: int = 0):
-        """Count unique values per column. Not JIT-compatible (uses np.unique)."""
+        """Count unique values per column. Not JIT-compatible (eager unique)."""
         if self._numeric_data is None:
             raise ValueError("No numeric columns")
-        data = np.asarray(self._numeric_data)
+        data = self._numeric_data
         if axis == 0:
-            counts = [len(np.unique(data[:, i])) for i in range(data.shape[1])]
+            counts = [len(jnp.unique(data[:, i])) for i in range(data.shape[1])]
             return Series(jnp.array(counts), index=np.array(self._numeric_cols), name="nunique")
         else:
-            counts = [len(np.unique(data[i, :])) for i in range(data.shape[0])]
+            counts = [len(jnp.unique(data[i, :])) for i in range(data.shape[0])]
             return Series(jnp.array(counts), index=self._index, name="nunique")
 
     def skew(self, axis: int = 0):
@@ -1013,15 +1013,15 @@ class DataFrame:
             return Series(result, index=self._index, name="sem")
 
     def mode(self, axis: int = 0):
-        """Mode (most frequent value). Not JIT-compatible."""
+        """Mode (most frequent value). Not JIT-compatible (eager unique)."""
         if self._numeric_data is None:
             raise ValueError("No numeric columns")
-        data = np.asarray(self._numeric_data)
+        data = self._numeric_data
         if axis == 0:
             modes = []
             for i in range(data.shape[1]):
-                vals, counts = np.unique(data[:, i], return_counts=True)
-                modes.append(vals[np.argmax(counts)])
+                vals, counts = jnp.unique(data[:, i], return_counts=True)
+                modes.append(vals[jnp.argmax(counts)])
             return DataFrame({col: [m] for col, m in zip(self._numeric_cols, modes)})
         else:
             raise NotImplementedError("mode(axis=1) not yet supported")
@@ -1653,7 +1653,7 @@ class DataFrame:
             if isinstance(right_on, str):
                 right_on = [right_on]
 
-        # Extract key arrays (eager structure discovery)
+        # Extract key arrays (eager — needs numpy for dict-based matching)
         left_keys = np.column_stack([np.asarray(self._get_column_data(k)) for k in left_on])
         right_keys = np.column_stack([np.asarray(right._get_column_data(k)) for k in right_on])
 
@@ -1703,15 +1703,15 @@ class DataFrame:
         """
         if isinstance(by, str):
             by = [by]
-        # Extract key column(s) — eager numpy for group discovery
+        # Extract key column(s) — eager jnp for group discovery (stays on GPU)
         key_col = by[0]
         dtype, idx = self._column_to_block[key_col]
-        key_data = np.asarray(self._dtype_blocks[dtype][:, idx])
-        # Discover groups eagerly
-        unique_keys, inverse = np.unique(key_data, return_inverse=True)
-        segment_ids = jnp.array(inverse, dtype=jnp.int32)
+        key_data = self._dtype_blocks[dtype][:, idx]
+        # Discover groups eagerly (jnp.unique works eagerly on GPU)
+        unique_keys, inverse = jnp.unique(key_data, return_inverse=True)
+        segment_ids = inverse.astype(jnp.int32)
         num_groups = len(unique_keys)
-        group_keys = jnp.array(unique_keys)
+        group_keys = unique_keys
         # Value columns = all columns except group key(s)
         val_cols = [c for c in self._column_order if c not in by]
         return DataFrameGroupBy(
@@ -2798,14 +2798,13 @@ class Series:
         )
 
     def value_counts(self, sort=True):
-        """Count occurrences of each unique value. Not JIT-compatible."""
-        data = np.asarray(self._data)
-        unique_vals, counts = np.unique(data, return_counts=True)
+        """Count occurrences of each unique value. Not JIT-compatible (eager)."""
+        unique_vals, counts = jnp.unique(self._data, return_counts=True)
         if sort:
-            order = np.argsort(-counts)
+            order = jnp.argsort(-counts)
             unique_vals = unique_vals[order]
             counts = counts[order]
-        return Series(jnp.array(counts), index=unique_vals, name=self._name)
+        return Series(counts, index=np.asarray(unique_vals), name=self._name)
 
     # Arithmetic operators
     def _binop(self, other, op):

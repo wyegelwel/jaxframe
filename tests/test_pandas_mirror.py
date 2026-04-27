@@ -1355,6 +1355,131 @@ def test_jax_info_table(capsys):
 # ============================
 
 
+# ============================
+# Corr / Cov / Interpolate
+# ============================
+
+
+class TestCorrCovInterpolate:
+    def test_corr(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [2.0, 4.0, 6.0, 8.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.corr()
+        expected = pdf.corr()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-4)
+
+    def test_cov(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [2.0, 4.0, 6.0, 8.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.cov()
+        expected = pdf.cov()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-4)
+
+    def test_interpolate_linear(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, float("nan"), 3.0, float("nan"), 5.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.interpolate()
+        expected = pdf.interpolate()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-4)
+
+
+# ============================
+# Melt / Reshape
+# ============================
+
+
+class TestMelt:
+    def test_melt_basic(self):
+        from jaxframe import DataFrame
+
+        data = {"id": [1.0, 2.0], "a": [10.0, 20.0], "b": [30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.melt(id_vars=["id"], value_vars=["a", "b"])
+        expected = pdf.melt(id_vars=["id"], value_vars=["a", "b"])
+        assert result.shape == expected.shape
+        # Check values column
+        np.testing.assert_allclose(
+            np.asarray(result["value"].values),
+            expected["value"].values,
+            rtol=1e-5,
+        )
+
+    def test_melt_no_id_vars(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0], "b": [3.0, 4.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.melt()
+        expected = pdf.melt()
+        assert result.shape == expected.shape
+
+
+# ============================
+# Merge
+# ============================
+
+
+class TestMerge:
+    def test_inner_merge(self):
+        from jaxframe import DataFrame
+
+        left = DataFrame({"key": [1.0, 2.0, 3.0], "val_l": [10.0, 20.0, 30.0]})
+        right = DataFrame({"key": [2.0, 3.0, 4.0], "val_r": [200.0, 300.0, 400.0]})
+        pdf_l = pd.DataFrame({"key": [1.0, 2.0, 3.0], "val_l": [10.0, 20.0, 30.0]})
+        pdf_r = pd.DataFrame({"key": [2.0, 3.0, 4.0], "val_r": [200.0, 300.0, 400.0]})
+
+        result = left.merge(right, on="key")
+        expected = pdf_l.merge(pdf_r, on="key")
+        assert result.shape == expected.shape
+        np.testing.assert_allclose(
+            np.asarray(result["val_l"].values),
+            expected["val_l"].values,
+            rtol=1e-5,
+        )
+        np.testing.assert_allclose(
+            np.asarray(result["val_r"].values),
+            expected["val_r"].values,
+            rtol=1e-5,
+        )
+
+    def test_left_merge(self):
+        from jaxframe import DataFrame
+
+        left = DataFrame({"key": [1.0, 2.0, 3.0], "val": [10.0, 20.0, 30.0]})
+        right = DataFrame({"key": [2.0, 3.0], "val_r": [200.0, 300.0]})
+        result = left.merge(right, on="key", how="left")
+        assert result.shape[0] == 3  # All left rows present
+
+    def test_merge_different_keys(self):
+        from jaxframe import DataFrame
+
+        left = DataFrame({"a": [1.0, 2.0], "val": [10.0, 20.0]})
+        right = DataFrame({"b": [1.0, 2.0], "val_r": [100.0, 200.0]})
+        result = left.merge(right, left_on="a", right_on="b")
+        assert result.shape == (2, 4)  # a, val, b, val_r (both keys kept when different names)
+
+    def test_merge_suffixes(self):
+        from jaxframe import DataFrame
+
+        left = DataFrame({"key": [1.0, 2.0], "val": [10.0, 20.0]})
+        right = DataFrame({"key": [1.0, 2.0], "val": [100.0, 200.0]})
+        result = left.merge(right, on="key", suffixes=("_left", "_right"))
+        cols = list(result.columns)
+        assert "val_left" in cols
+        assert "val_right" in cols
+
+
 class TestEWM:
     def test_ewm_mean_span(self):
         from jaxframe import DataFrame

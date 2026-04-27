@@ -1619,6 +1619,79 @@ class DataFrame:
             return (self > left) & (self < right)
 
     # ========================================
+    # Merge / Join
+    # ========================================
+
+    def merge(
+        self,
+        right,
+        on=None,
+        left_on=None,
+        right_on=None,
+        how="inner",
+        suffixes=("_x", "_y"),
+    ):
+        """Merge two DataFrames on key columns.
+
+        Structure discovery (key matching) is eager.
+        Data gathering uses array indexing.
+
+        Args:
+            right: DataFrame to merge with
+            on: Column name(s) to join on (if same in both)
+            left_on/right_on: Column name(s) in left/right DataFrames
+            how: 'inner', 'left', 'right', 'outer'
+            suffixes: Suffixes for overlapping non-key column names
+        """
+        # Resolve key columns
+        if on is not None:
+            left_on = on if isinstance(on, list) else [on]
+            right_on = left_on
+        else:
+            if isinstance(left_on, str):
+                left_on = [left_on]
+            if isinstance(right_on, str):
+                right_on = [right_on]
+
+        # Extract key arrays (eager structure discovery)
+        left_keys = np.column_stack([np.asarray(self._get_column_data(k)) for k in left_on])
+        right_keys = np.column_stack([np.asarray(right._get_column_data(k)) for k in right_on])
+
+        # Build index pairs (eager)
+        left_idx, right_idx = _merge_indices(left_keys, right_keys, how)
+
+        # Determine output columns and suffixes
+        left_suffix, right_suffix = suffixes
+        right_non_key = [c for c in right._column_order if c not in right_on]
+        left_non_key = [c for c in self._column_order if c not in left_on]
+
+        result_data = {}
+
+        # Columns from left
+        for col in self._column_order:
+            out_col = col
+            if col not in left_on and col in right_non_key:
+                out_col = col + left_suffix
+            if col in self._column_to_block:
+                result_data[out_col] = self._get_column_data(col)[left_idx]
+            elif col in self._object_data:
+                result_data[out_col] = self._object_data[col][left_idx]
+
+        # Columns from right (skip shared key)
+        for col in right._column_order:
+            if col in right_on and col in left_on:
+                continue
+            out_col = col
+            if col not in right_on and col in left_non_key:
+                out_col = col + right_suffix
+            if col in right._column_to_block:
+                result_data[out_col] = right._get_column_data(col)[right_idx]
+            elif col in right._object_data:
+                result_data[out_col] = right._object_data[col][right_idx]
+
+        return DataFrame(result_data)
+
+    # ========================================
     # GroupBy
     # ========================================
 
@@ -1730,6 +1803,95 @@ class DataFrame:
             index=self._index.copy(),
             column_order=list(self._column_order),
         )
+
+    def melt(
+        self,
+        id_vars=None,
+        value_vars=None,
+        var_name="variable",
+        value_name="value",
+    ):
+        """Unpivot from wide to long format.
+
+        Structure discovery (which columns become rows) is eager.
+        Data gathering uses array operations.
+
+        Args:
+            id_vars: Column(s) to keep as identifier
+            value_vars: Column(s) to unpivot (default: all non-id columns)
+            var_name: Name for the variable column
+            value_name: Name for the value column
+        """
+        if id_vars is None:
+            id_vars = []
+        elif isinstance(id_vars, str):
+            id_vars = [id_vars]
+        if value_vars is None:
+            value_vars = [c for c in self._column_order if c not in id_vars]
+        elif isinstance(value_vars, str):
+            value_vars = [value_vars]
+
+        n_rows = len(self._index)
+        n_val_cols = len(value_vars)
+
+        result_data = {}
+
+        # Repeat id columns n_val_cols times
+        for col in id_vars:
+            col_data = self._get_column_data(col)
+            result_data[col] = jnp.tile(col_data, n_val_cols)
+
+        # Variable column (object — column names repeated)
+        var_col = np.repeat(value_vars, n_rows)
+        result_data[var_name] = var_col
+
+        # Value column — stack all value columns
+        val_arrays = []
+        for col in value_vars:
+            val_arrays.append(self._get_column_data(col))
+        result_data[value_name] = jnp.concatenate(val_arrays)
+
+        return DataFrame(result_data)
+
+    def interpolate(self, method="linear"):
+        """Interpolate NaN values. JIT-compatible for 'linear' method.
+
+        Uses linear interpolation between nearest valid observations.
+        """
+        if method != "linear":
+            raise ValueError(f"Only 'linear' interpolation supported, got {method!r}")
+
+        def _interp_block(block):
+            n = block.shape[0]
+            idx = jnp.arange(n, dtype=jnp.float32)
+            result = block.copy()
+            for c in range(block.shape[1]):
+                col = block[:, c]
+                valid = jnp.isfinite(col)
+                # If all valid or all NaN, skip
+                n_valid = jnp.sum(valid)
+                # Use jnp.interp for linear interpolation
+                valid_idx = jnp.where(valid, idx, jnp.nan)
+                valid_vals = jnp.where(valid, col, jnp.nan)
+                # Compact valid values
+                order = jnp.argsort(~valid)  # valid first
+                sorted_idx = valid_idx[order][:n_valid]
+                sorted_vals = valid_vals[order][:n_valid]
+                interped = jnp.interp(idx, sorted_idx, sorted_vals)
+                result = result.at[:, c].set(jnp.where(n_valid > 0, interped, col))
+            return result
+
+        return self._apply_blockwise(_interp_block)
+
+    def pivot_table(self, values=None, index=None, columns=None, aggfunc="mean"):
+        """Create pivot table. Delegates to pandas (not JIT-compatible)."""
+        import pandas as pd
+
+        pdf = self.to_pandas()
+        result = pdf.pivot_table(values=values, index=index, columns=columns, aggfunc=aggfunc)
+        if isinstance(result, pd.DataFrame):
+            return DataFrame.from_pandas(result.reset_index())
+        return result
 
     def to_csv(self, path, index=False, **kwargs):
         """Write DataFrame to CSV file. Not JIT-compatible (I/O)."""
@@ -2824,6 +2986,65 @@ class _StringAccessor:
 # ========================================
 # Rolling
 # ========================================
+
+
+def _merge_indices(left_keys, right_keys, how):
+    """Compute row index pairs for merge (eager, structure discovery).
+
+    Returns (left_idx, right_idx) — numpy arrays of row indices.
+    """
+    # Build lookup from right keys to row indices
+    right_lookup = {}
+    for i, key in enumerate(map(tuple, right_keys)):
+        right_lookup.setdefault(key, []).append(i)
+
+    left_indices = []
+    right_indices = []
+
+    if how == "inner":
+        for i, key in enumerate(map(tuple, left_keys)):
+            if key in right_lookup:
+                for j in right_lookup[key]:
+                    left_indices.append(i)
+                    right_indices.append(j)
+    elif how == "left":
+        for i, key in enumerate(map(tuple, left_keys)):
+            if key in right_lookup:
+                for j in right_lookup[key]:
+                    left_indices.append(i)
+                    right_indices.append(j)
+            else:
+                left_indices.append(i)
+                right_indices.append(-1)  # Will need NaN handling
+    elif how == "right":
+        left_lookup = {}
+        for i, key in enumerate(map(tuple, left_keys)):
+            left_lookup.setdefault(key, []).append(i)
+        for j, key in enumerate(map(tuple, right_keys)):
+            if key in left_lookup:
+                for i in left_lookup[key]:
+                    left_indices.append(i)
+                    right_indices.append(j)
+            else:
+                left_indices.append(-1)
+                right_indices.append(j)
+    elif how == "outer":
+        matched_right = set()
+        for i, key in enumerate(map(tuple, left_keys)):
+            if key in right_lookup:
+                for j in right_lookup[key]:
+                    left_indices.append(i)
+                    right_indices.append(j)
+                    matched_right.add(j)
+            else:
+                left_indices.append(i)
+                right_indices.append(-1)
+        for j in range(len(right_keys)):
+            if j not in matched_right:
+                left_indices.append(-1)
+                right_indices.append(j)
+
+    return np.array(left_indices), np.array(right_indices)
 
 
 def _rolling_window(x, window):

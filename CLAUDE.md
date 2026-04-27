@@ -6,6 +6,23 @@ JAX-based DataFrame library with pandas-compatible API. Owner: Wil Yegelwel.
 
 **Maximize JAX operation support to 100%.** Every DataFrame and Series method must be JIT-compilable and, where mathematically possible, differentiable via `jax.grad`. The only acceptable skips are mathematically necessary (e.g., `min`/`max` grad is non-smooth, boolean outputs like `isna` are not differentiable).
 
+## Architecture: Hybrid Eager/JIT
+
+The core architectural principle: **separate structure discovery from data computation**.
+
+- **Structure discovery** (shapes, indices, group assignments, join keys, unique values) happens **eagerly** — outside `jax.jit` traces. Use `jnp.*` (not `np.*`) so it still runs on GPU. Results are concrete arrays that become static `aux_data` in JAX pytrees.
+- **Data computation** (arithmetic, reductions, gathers, scatters) uses **JAX ops** (`jnp.*`, `jax.ops.segment_*`, `jnp.take`). These are JIT-compiled and dispatch to GPU/TPU.
+- **"Eager" ≠ CPU.** Eager just means "not inside a JIT trace." `jnp.unique` called eagerly on GPU data runs on GPU and returns a concrete GPU array. Only `np.*` forces data to CPU — avoid it for data ops.
+
+This means **every operation is GPU-compatible**:
+- `groupby`: group discovery is eager → segment ops are JIT (already works on GPU)
+- `merge/join`: key matching computes indices eagerly → data gathering via `jnp.take` is JIT
+- `value_counts`: unique value discovery is eager → counting via segment_sum is JIT
+- `sort_values`: argsort is eager → data permutation via `jnp.take` is JIT
+- `drop_duplicates`: duplicate detection is eager → row selection via `jnp.take` is JIT
+
+When adding new ops, always ask: "What is structure, and what is computation?" Put structure in eager code, computation in JAX ops.
+
 ## Implementation Rules
 
 - **Always use `_apply_blockwise` or `_from_parts`** when returning new DataFrames. Never reconstruct through `DataFrame.__init__` from inside operations — it calls `np.asarray` which breaks JAX tracing.

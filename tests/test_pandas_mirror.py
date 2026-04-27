@@ -1350,6 +1350,329 @@ def test_jax_info_table(capsys):
 # ============================
 
 
+# ============================
+# EWM (exponentially weighted)
+# ============================
+
+
+class TestEWM:
+    def test_ewm_mean_span(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0, 5.0], "b": [5.0, 4.0, 3.0, 2.0, 1.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.ewm(span=3).mean()
+        expected = pdf.ewm(span=3).mean()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-3)
+
+    def test_ewm_mean_alpha(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.ewm(alpha=0.5).mean()
+        expected = pdf.ewm(alpha=0.5).mean()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-3)
+
+
+# ============================
+# duplicated / drop_duplicates
+# ============================
+
+
+class TestDuplicates:
+    def test_duplicated_first(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 1.0, 3.0, 2.0], "b": [10.0, 20.0, 10.0, 30.0, 20.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.duplicated()
+        expected = pdf.duplicated()
+        np.testing.assert_array_equal(np.asarray(result.values), expected.values)
+
+    def test_duplicated_last(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 1.0, 3.0, 2.0], "b": [10.0, 20.0, 10.0, 30.0, 20.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.duplicated(keep="last")
+        expected = pdf.duplicated(keep="last")
+        np.testing.assert_array_equal(np.asarray(result.values), expected.values)
+
+    def test_duplicated_false(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 1.0, 3.0, 2.0], "b": [10.0, 20.0, 10.0, 30.0, 20.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.duplicated(keep=False)
+        expected = pdf.duplicated(keep=False)
+        np.testing.assert_array_equal(np.asarray(result.values), expected.values)
+
+    def test_drop_duplicates(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 1.0, 3.0], "b": [10.0, 20.0, 10.0, 30.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.drop_duplicates()
+        expected = pdf.drop_duplicates()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+        assert result.shape == expected.shape
+
+    def test_drop_duplicates_subset(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 1.0, 3.0], "b": [10.0, 20.0, 99.0, 30.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.drop_duplicates(subset=["a"])
+        expected = pdf.drop_duplicates(subset=["a"])
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+
+
+# ============================
+# pipe, between, map, replace, rank
+# ============================
+
+
+class TestPipeBetweenMapReplace:
+    def test_pipe_df(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}
+        jdf = DataFrame(data)
+        result = jdf.pipe(lambda df: df * 2 + 1)
+        expected = jdf * 2 + 1
+        np.testing.assert_allclose(np.asarray(result.values), np.asarray(expected.values))
+
+    def test_pipe_series(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0]}
+        jdf = DataFrame(data)
+        result = jdf["a"].pipe(lambda s: s * 3)
+        np.testing.assert_allclose(np.asarray(result.values), [3.0, 6.0, 9.0], rtol=1e-5)
+
+    def test_between_series(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0, 5.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf["a"].between(2.0, 4.0)
+        expected = pdf["a"].between(2.0, 4.0)
+        np.testing.assert_array_equal(np.asarray(result.values), expected.values)
+
+    def test_between_exclusive(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0, 5.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf["a"].between(2.0, 4.0, inclusive="neither")
+        expected = pdf["a"].between(2.0, 4.0, inclusive="neither")
+        np.testing.assert_array_equal(np.asarray(result.values), expected.values)
+
+    def test_map_series(self):
+        import jax.numpy as jnp
+
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 4.0, 9.0]}
+        jdf = DataFrame(data)
+        result = jdf["a"].map(jnp.sqrt)
+        np.testing.assert_allclose(np.asarray(result.values), [1.0, 2.0, 3.0], rtol=1e-5)
+
+    def test_replace_series(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 2.0]}
+        jdf = DataFrame(data)
+        result = jdf["a"].replace(2.0, 99.0)
+        np.testing.assert_allclose(np.asarray(result.values), [1.0, 99.0, 3.0, 99.0], rtol=1e-5)
+
+
+# ============================
+# Rank
+# ============================
+
+
+class TestRank:
+    def test_rank_ordinal(self):
+        from jaxframe import DataFrame
+
+        # No ties, so ordinal == first == average
+        data = {"a": [3.0, 1.0, 4.0, 2.0], "b": [10.0, 40.0, 20.0, 30.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.rank()
+        expected = pdf.rank(method="first")
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+
+    def test_rank_descending(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [3.0, 1.0, 4.0, 2.0], "b": [10.0, 40.0, 20.0, 30.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.rank(ascending=False)
+        expected = pdf.rank(ascending=False, method="first")
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+
+
+# ============================
+# Expanding window
+# ============================
+
+
+class TestExpanding:
+    def test_expanding_sum(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.expanding().sum()
+        expected = pdf.expanding().sum()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+
+    def test_expanding_mean(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.expanding().mean()
+        expected = pdf.expanding().mean()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+
+    def test_expanding_min(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [3.0, 1.0, 4.0, 2.0], "b": [40.0, 20.0, 30.0, 10.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.expanding().min()
+        expected = pdf.expanding().min()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+
+    def test_expanding_max(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [3.0, 1.0, 4.0, 2.0], "b": [40.0, 20.0, 30.0, 10.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.expanding().max()
+        expected = pdf.expanding().max()
+        np.testing.assert_allclose(np.asarray(result.values), expected.values, rtol=1e-5)
+
+    def test_expanding_std(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.expanding(min_periods=2).std()
+        expected = pdf.expanding(min_periods=2).std()
+        # Skip first row (NaN due to min_periods=2)
+        np.testing.assert_allclose(np.asarray(result.values)[1:], expected.values[1:], rtol=1e-4)
+
+    def test_expanding_var(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 2.0, 3.0, 4.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.expanding(min_periods=2).var()
+        expected = pdf.expanding(min_periods=2).var()
+        np.testing.assert_allclose(np.asarray(result.values)[1:], expected.values[1:], rtol=1e-4)
+
+
+# ============================
+# diff / pct_change
+# ============================
+
+
+class TestDiffPctChange:
+    def test_diff_default(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 3.0, 6.0, 10.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.diff()
+        expected = pdf.diff()
+        # First row is NaN in both
+        np.testing.assert_allclose(np.asarray(result.values)[1:], expected.values[1:], rtol=1e-5)
+        assert np.all(np.isnan(np.asarray(result.values)[0]))
+
+    def test_diff_periods_2(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 3.0, 6.0, 10.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.diff(periods=2)
+        expected = pdf.diff(periods=2)
+        np.testing.assert_allclose(np.asarray(result.values)[2:], expected.values[2:], rtol=1e-5)
+
+    def test_diff_negative_periods(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 3.0, 6.0, 10.0], "b": [10.0, 20.0, 30.0, 40.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.diff(periods=-1)
+        expected = pdf.diff(periods=-1)
+        # Last row is NaN
+        np.testing.assert_allclose(np.asarray(result.values)[:-1], expected.values[:-1], rtol=1e-5)
+
+    def test_pct_change_default(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [10.0, 20.0, 30.0], "b": [100.0, 50.0, 200.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.pct_change()
+        expected = pdf.pct_change()
+        np.testing.assert_allclose(np.asarray(result.values)[1:], expected.values[1:], rtol=1e-5)
+
+    def test_pct_change_periods_2(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [10.0, 20.0, 30.0, 40.0], "b": [100.0, 50.0, 200.0, 400.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf.pct_change(periods=2)
+        expected = pdf.pct_change(periods=2)
+        np.testing.assert_allclose(np.asarray(result.values)[2:], expected.values[2:], rtol=1e-5)
+
+    def test_series_diff(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [1.0, 3.0, 6.0, 10.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf["a"].diff()
+        expected = pdf["a"].diff()
+        np.testing.assert_allclose(np.asarray(result.values)[1:], expected.values[1:], rtol=1e-5)
+
+    def test_series_pct_change(self):
+        from jaxframe import DataFrame
+
+        data = {"a": [10.0, 20.0, 30.0]}
+        jdf = DataFrame(data)
+        pdf = pd.DataFrame(data)
+        result = jdf["a"].pct_change()
+        expected = pdf["a"].pct_change()
+        np.testing.assert_allclose(np.asarray(result.values)[1:], expected.values[1:], rtol=1e-5)
+
+
 class TestIO:
     def test_to_csv_and_read_csv(self, tmp_path):
         from jaxframe import DataFrame, read_csv

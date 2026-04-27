@@ -30,6 +30,14 @@ OPERATIONS = [
     ("add_sum", lambda df: (df + 10).sum(axis=None), True, True),
     ("pow_sum", lambda df: (df**2).sum(axis=None), True, True),
     ("chain", lambda df: ((df + 1) * 2 - 3).sum(axis=None), True, True),
+    # DataFrame * DataFrame, DataFrame * array (elementwise JIT compat)
+    ("df_mul_df", lambda df: (df * df).sum(axis=None), True, True),
+    ("df_add_df", lambda df: (df + df).sum(axis=None), True, True),
+    ("df_sub_df", lambda df: (df - df).sum(axis=None), True, True),
+    ("df_mul_arr", lambda df: (df * jnp.array([2.0, 3.0])).sum(axis=None), True, True),
+    # diff / pct_change
+    ("diff_sum", lambda df: df.diff().sum(axis=None), True, True),
+    ("pct_change_sum", lambda df: df.pct_change().sum(axis=None), True, False),
     # Where / clip
     ("where_sum", lambda df: df.where(df > 3, 0).sum(axis=None), True, True),
     ("clip_sum", lambda df: df.clip(2, 5).sum(axis=None), True, True),
@@ -53,6 +61,9 @@ OPERATIONS = [
     ("quantile_sum", lambda df: df.quantile(0.5).sum(), True, False),
     ("nlargest_sum", lambda df: df.nlargest(2, "a").sum(axis=None), True, False),
     ("nsmallest_sum", lambda df: df.nsmallest(2, "a").sum(axis=None), True, False),
+    # pipe, between, rank
+    ("pipe_sum", lambda df: df.pipe(lambda d: d * 2).sum(axis=None), True, True),
+    ("rank_sum", lambda df: df.rank().sum(axis=None), True, False),
     # Column manipulation (Session 6)
     ("drop_sum", lambda df: df.drop(columns=["a"]).sum(axis=None), True, True),
     ("rename_sum", lambda df: df.rename(columns={"a": "x"}).sum(axis=None), True, True),
@@ -74,6 +85,13 @@ OPERATIONS = [
     ("roll_mean", lambda df: df.rolling(2).mean().sum(axis=None), True, True),
     ("roll_min", lambda df: df.rolling(2).min().sum(axis=None), True, False),
     ("roll_max", lambda df: df.rolling(2).max().sum(axis=None), True, False),
+    # Expanding windows (JIT-compatible)
+    ("exp_sum", lambda df: df.expanding().sum().sum(axis=None), True, True),
+    ("exp_mean", lambda df: df.expanding().mean().sum(axis=None), True, True),
+    ("exp_min", lambda df: df.expanding().min().sum(axis=None), True, False),
+    ("exp_max", lambda df: df.expanding().max().sum(axis=None), True, False),
+    # EWM
+    ("ewm_mean", lambda df: df.ewm(span=2).mean().sum(axis=None), True, True),
     # Session 17: skew, kurt, sem (JIT+grad)
     ("skew_sum", lambda df: df.skew().values.sum(), True, True),
     ("sem_sum", lambda df: df.sem().values.sum(), True, True),

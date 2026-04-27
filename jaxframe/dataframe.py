@@ -1249,6 +1249,136 @@ class DataFrame:
             column_order=list(self._column_order),
         )
 
+    def rank(self, ascending=True, method="ordinal"):
+        """Rank values along axis 0. JIT-compatible (argsort-based, not differentiable).
+
+        Args:
+            ascending: True for smallest=1 ranking
+            method: 'ordinal' (default) — ties broken by position.
+                    'average', 'min', 'max', 'dense' also supported.
+        """
+
+        def _rank_block(block):
+            n = block.shape[0]
+            if method == "ordinal":
+                if ascending:
+                    order = jnp.argsort(block, axis=0)
+                    ranks = jnp.argsort(order, axis=0) + 1
+                else:
+                    order = jnp.argsort(-block, axis=0)
+                    ranks = jnp.argsort(order, axis=0) + 1
+                return ranks.astype(jnp.float32)
+            elif method == "average":
+                order = jnp.argsort(block, axis=0)
+                sorted_block = jnp.take_along_axis(block, order, axis=0)
+                ranks = jnp.argsort(order, axis=0).astype(jnp.float32) + 1
+                # For ties, average the ranks
+                for c in range(block.shape[1]):
+                    vals = sorted_block[:, c]
+                    # Group equal values and assign average rank
+                    same_as_next = jnp.concatenate([vals[:-1] == vals[1:], jnp.array([False])])
+                    # Use cumulative sum of group boundaries
+                    group_id = jnp.cumsum(~same_as_next)
+                    group_id = jnp.concatenate([jnp.array([0]), group_id[:-1]])
+                    # Compute average rank per group using segment operations
+                    ordinal_ranks = jnp.arange(1, n + 1, dtype=jnp.float32)
+                    rank_sums = jnp.zeros(n, dtype=jnp.float32).at[group_id].add(ordinal_ranks)
+                    rank_counts = jnp.zeros(n, dtype=jnp.float32).at[group_id].add(1.0)
+                    avg_ranks = rank_sums / rank_counts
+                    # Map back to original positions
+                    sorted_avg = avg_ranks[group_id]
+                    result_col = jnp.empty(n, dtype=jnp.float32)
+                    result_col = result_col.at[order[:, c]].set(sorted_avg)
+                    ranks = ranks.at[:, c].set(result_col)
+                if not ascending:
+                    ranks = n + 1 - ranks
+                return ranks
+            else:
+                # Fallback: ordinal
+                order = jnp.argsort(block, axis=0)
+                ranks = jnp.argsort(order, axis=0) + 1
+                if not ascending:
+                    ranks = block.shape[0] + 1 - ranks
+                return ranks.astype(jnp.float32)
+
+        return self._apply_blockwise(_rank_block)
+
+    def duplicated(self, subset=None, keep="first"):
+        """Return boolean Series denoting duplicate rows (eager, not JIT-compatible).
+
+        Args:
+            subset: column labels to consider. Default: all columns.
+            keep: 'first', 'last', or False (mark all duplicates)
+        """
+        if subset is None:
+            subset = list(self._column_order)
+        elif isinstance(subset, str):
+            subset = [subset]
+
+        # Build (n_rows, n_subset_cols) array for comparison
+        cols = [np.asarray(self._get_column_data(c)) for c in subset]
+        data = np.column_stack(cols)
+
+        # Use structured array for row-wise comparison
+        dt = [(f"f{i}", data.dtype) for i in range(data.shape[1])]
+        structured = np.array([tuple(row) for row in data], dtype=dt)
+        _, idx, counts = np.unique(structured, return_index=True, return_counts=True)
+
+        mask = np.zeros(len(data), dtype=bool)
+        if keep == "first":
+            # Mark all but first occurrence
+            seen = {}
+            for i, row in enumerate(structured):
+                key = row.item() if hasattr(row, "item") else tuple(row)
+                if key in seen:
+                    mask[i] = True
+                else:
+                    seen[key] = i
+        elif keep == "last":
+            seen = {}
+            for i in range(len(structured) - 1, -1, -1):
+                row = structured[i]
+                key = row.item() if hasattr(row, "item") else tuple(row)
+                if key in seen:
+                    mask[i] = True
+                else:
+                    seen[key] = i
+        else:  # keep=False
+            for i, row in enumerate(structured):
+                key = row.item() if hasattr(row, "item") else tuple(row)
+                # Mark if appears more than once
+                pass
+            seen_count = {}
+            for row in structured:
+                key = row.item() if hasattr(row, "item") else tuple(row)
+                seen_count[key] = seen_count.get(key, 0) + 1
+            for i, row in enumerate(structured):
+                key = row.item() if hasattr(row, "item") else tuple(row)
+                if seen_count[key] > 1:
+                    mask[i] = True
+
+        return Series(jnp.array(mask), index=self._index, name=None)
+
+    def drop_duplicates(self, subset=None, keep="first"):
+        """Remove duplicate rows (eager, not JIT-compatible).
+
+        Structure discovery (finding duplicates) is eager.
+        Row selection uses jnp.take (JIT-compatible data op).
+        """
+        dup_mask = self.duplicated(subset=subset, keep=keep)
+        keep_mask = ~np.asarray(dup_mask.values)
+        keep_indices = np.where(keep_mask)[0]
+
+        new_blocks = {dt: block[keep_indices] for dt, block in self._dtype_blocks.items()}
+        new_obj = {k: v[keep_indices] for k, v in self._object_data.items()}
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=dict(self._column_to_block),
+            object_data=new_obj,
+            index=self._index[keep_indices],
+            column_order=self._column_order,
+        )
+
     def reset_index(self, drop=True):
         """Reset index to default integer range.
 
@@ -1467,6 +1597,27 @@ class DataFrame:
                 index=self._index,
             )
 
+    def pipe(self, func, *args, **kwargs):
+        """Apply a function to the DataFrame. JIT-compatible if func is."""
+        return func(self, *args, **kwargs)
+
+    def between(self, left, right, inclusive="both"):
+        """Boolean mask for values between left and right (JIT-compatible).
+
+        Args:
+            left: Lower bound (scalar)
+            right: Upper bound (scalar)
+            inclusive: 'both', 'neither', 'left', 'right'
+        """
+        if inclusive == "both":
+            return (self >= left) & (self <= right)
+        elif inclusive == "left":
+            return (self >= left) & (self < right)
+        elif inclusive == "right":
+            return (self > left) & (self <= right)
+        else:  # neither
+            return (self > left) & (self < right)
+
     # ========================================
     # GroupBy
     # ========================================
@@ -1516,6 +1667,26 @@ class DataFrame:
         if min_periods is None:
             min_periods = window
         return Rolling(self, window=window, min_periods=min_periods)
+
+    def expanding(self, min_periods: int = 1):
+        """Return an Expanding object for expanding window calculations (JIT-compatible)."""
+        return Expanding(self, min_periods=min_periods)
+
+    def ewm(self, alpha=None, span=None, com=None, halflife=None, min_periods: int = 0):
+        """Return an EWM object for exponentially weighted calculations (JIT-compatible).
+
+        Exactly one of alpha, span, com, halflife must be specified.
+        """
+        if alpha is None:
+            if span is not None:
+                alpha = 2.0 / (span + 1.0)
+            elif com is not None:
+                alpha = 1.0 / (com + 1.0)
+            elif halflife is not None:
+                alpha = 1.0 - jnp.exp(-jnp.log(2.0) / halflife)
+            else:
+                raise ValueError("Must specify one of alpha, span, com, halflife")
+        return EWM(self, alpha=float(alpha), min_periods=min_periods)
 
     # ========================================
     # Pandas interop & copy
@@ -1610,75 +1781,32 @@ class DataFrame:
         """
         Calculate first discrete difference (JIT-compatible, differentiable).
 
-        Args:
-            periods: Number of periods for differencing
-
-        Returns:
-            DataFrame with differences (NaN for undefined values, matching pandas)
-
-        Examples:
-            >>> df.diff()  # df[i] - df[i-1]
-            >>> df.diff(2)  # df[i] - df[i-2]
+        Computes self - self.shift(periods). NaN where shift introduces gaps.
         """
-        if not self._dtype_blocks:
-            raise ValueError("No numeric columns for diff")
-
-        # Use NaN for shifted values (default behavior)
         shifted = self.shift(periods)
-
-        # Calculate differences for each column
-        result_data = {}
+        col_arrays = {}
         for col in self._column_order:
             if col in self._column_to_block:
-                col_data = self._get_column_data(col)
-                shifted_data = shifted._get_column_data(col)
-                diff_col = col_data - shifted_data
-
-                # Set first 'periods' rows to NaN (matching pandas behavior)
-                if periods > 0:
-                    mask = jnp.arange(len(self._index)) < periods
-                    diff_col = jnp.where(mask, jnp.nan, diff_col)
-                elif periods < 0:
-                    # For negative periods, mask the last abs(periods) rows
-                    abs_periods = abs(periods)
-                    mask = jnp.arange(len(self._index)) >= (len(self._index) - abs_periods)
-                    diff_col = jnp.where(mask, jnp.nan, diff_col)
-
-                result_data[col] = diff_col
-
-        return DataFrame(result_data, index=self._index.copy())
+                col_arrays[col] = self._get_column_data(col) - shifted._get_column_data(col)
+        return DataFrame._from_column_arrays(
+            col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
+        )
 
     def pct_change(self, periods: int = 1):
         """
         Calculate percentage change (JIT-compatible, differentiable).
 
-        Args:
-            periods: Number of periods for percentage change
-
-        Returns:
-            DataFrame with percentage changes (NaN for undefined values, matching pandas)
-
-        Formula: (current - previous) / previous
-
-        Examples:
-            >>> df.pct_change()  # (df[i] - df[i-1]) / df[i-1]
+        Computes (self - self.shift(periods)) / self.shift(periods).
         """
-        if not self._dtype_blocks:
-            raise ValueError("No numeric columns for pct_change")
-
-        # Use NaN for shifted values (default behavior)
-        # This will naturally produce NaN in the output for undefined values
         shifted = self.shift(periods)
-
-        # Calculate percentage change for each column
-        result_data = {}
+        col_arrays = {}
         for col in self._column_order:
             if col in self._column_to_block:
-                col_data = self._get_column_data(col)
-                shifted_data = shifted._get_column_data(col)
-                result_data[col] = (col_data - shifted_data) / shifted_data
-
-        return DataFrame(result_data, index=self._index.copy())
+                s = shifted._get_column_data(col)
+                col_arrays[col] = (self._get_column_data(col) - s) / s
+        return DataFrame._from_column_arrays(
+            col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
+        )
 
     def where(self, condition, fill_value):
         """
@@ -2118,76 +2246,104 @@ class DataFrame:
             if self._column_order != other._column_order:
                 raise ValueError(f"Column mismatch for {op_name}")
 
-            # Collect results for each column
-            result_data = {}
+            # Fast path: same block structure — operate block-by-block
+            if self._column_to_block == other._column_to_block:
+                new_blocks = {}
+                new_col_to_block = {}
+                for dtype, block in self._dtype_blocks.items():
+                    other_block = other._dtype_blocks[dtype]
+                    result_dtype = jnp.result_type(dtype, dtype)
+                    new_blocks[np.dtype(result_dtype)] = op(block, other_block)
+                for col, (old_dtype, idx) in self._column_to_block.items():
+                    result_dtype = jnp.result_type(old_dtype, old_dtype)
+                    new_col_to_block[col] = (np.dtype(result_dtype), idx)
+                return DataFrame._from_parts(
+                    dtype_blocks=new_blocks,
+                    column_to_block=new_col_to_block,
+                    object_data=self._object_data.copy(),
+                    index=self._index.copy(),
+                    column_order=self._column_order,
+                )
+
+            # Slow path: column-by-column with repack
+            col_arrays = {}
             for col in self._column_order:
                 if col in self._column_to_block and col in other._column_to_block:
                     left_data = self._get_column_data(col)
                     right_data = other._get_column_data(col)
-
-                    # Determine result dtype
                     left_dtype, _ = self._column_to_block[col]
                     right_dtype, _ = other._column_to_block[col]
                     result_dtype = jnp.result_type(left_dtype, right_dtype)
+                    col_arrays[col] = op(left_data, right_data).astype(result_dtype)
 
-                    result_data[col] = op(left_data, right_data).astype(result_dtype)
-
-            return DataFrame(result_data, index=self._index.copy())
+            return DataFrame._from_column_arrays(
+                col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
+            )
 
         elif type(other).__name__ == "Series":
             # Series broadcasts across rows (like pandas)
             # Each column gets the corresponding value from the Series
-            result_data = {}
+            # Build index lookup eagerly (structure discovery)
+            if hasattr(other, "_index"):
+                series_lookup = {name: i for i, name in enumerate(other._index)}
+            else:
+                series_lookup = None
+
+            col_arrays = {}
             for col in self._column_order:
                 if col in self._column_to_block:
                     col_data = self._get_column_data(col)
                     dtype, _ = self._column_to_block[col]
 
-                    # Find this column's value in the Series
-                    # Series._index contains column names, Series._data contains values
-                    if hasattr(other, "_index"):
-                        # Find column position in Series index
-                        series_idx = np.where(other._index == col)[0]
-                        if len(series_idx) > 0:
-                            series_value = other._data[series_idx[0]]
-                        else:
-                            continue  # Column not in Series, skip it
+                    if series_lookup is not None:
+                        if col not in series_lookup:
+                            continue
+                        series_value = other._data[series_lookup[col]]
                     else:
-                        # Fallback: use index in column_order
                         numeric_cols = [c for c in self._column_order if c in self._column_to_block]
                         col_idx = numeric_cols.index(col)
                         series_value = other._data[col_idx]
 
                     result_dtype = jnp.result_type(dtype, other._data.dtype)
-                    result_data[col] = op(col_data, series_value).astype(result_dtype)
+                    col_arrays[col] = op(col_data, series_value).astype(result_dtype)
 
-            return DataFrame(result_data, index=self._index.copy())
+            return DataFrame._from_column_arrays(
+                col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
+            )
 
         elif isinstance(other, (np.ndarray, jnp.ndarray)):
             # Array operation
             other_arr = jnp.asarray(other)
 
-            # Handle 1D arrays: broadcast across columns (like pandas)
             if other_arr.ndim == 1 and len(other_arr) == len(self._column_order):
-                # Array length matches number of columns - broadcast across columns
-                result_data = {}
+                # 1D array matching columns: broadcast across columns
+                col_arrays = {}
                 numeric_cols = [c for c in self._column_order if c in self._column_to_block]
                 for idx, col in enumerate(numeric_cols):
                     col_data = self._get_column_data(col)
                     dtype, _ = self._column_to_block[col]
                     result_dtype = jnp.result_type(dtype, other_arr.dtype)
-                    result_data[col] = op(col_data, other_arr[idx]).astype(result_dtype)
-                return DataFrame(result_data, index=self._index.copy())
+                    col_arrays[col] = op(col_data, other_arr[idx]).astype(result_dtype)
+                return DataFrame._from_column_arrays(
+                    col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
+                )
             else:
-                # Array broadcasts element-wise
-                result_data = {}
-                for col in self._column_order:
-                    if col in self._column_to_block:
-                        col_data = self._get_column_data(col)
-                        dtype, _ = self._column_to_block[col]
-                        result_dtype = jnp.result_type(dtype, other_arr.dtype)
-                        result_data[col] = op(col_data, other_arr).astype(result_dtype)
-                return DataFrame(result_data, index=self._index.copy())
+                # Array broadcasts element-wise across all blocks
+                new_blocks = {}
+                new_col_to_block = {}
+                for dtype, block in self._dtype_blocks.items():
+                    result_dtype = jnp.result_type(dtype, other_arr.dtype)
+                    new_blocks[np.dtype(result_dtype)] = op(block, other_arr)
+                for col, (old_dtype, idx) in self._column_to_block.items():
+                    result_dtype = jnp.result_type(old_dtype, other_arr.dtype)
+                    new_col_to_block[col] = (np.dtype(result_dtype), idx)
+                return DataFrame._from_parts(
+                    dtype_blocks=new_blocks,
+                    column_to_block=new_col_to_block,
+                    object_data=self._object_data.copy(),
+                    index=self._index.copy(),
+                    column_order=self._column_order,
+                )
 
         else:
             raise TypeError(f"Unsupported operand type for {op_name}: {type(other)}")
@@ -2209,6 +2365,35 @@ class DataFrame:
         df._index = index
         df._column_order = column_order
         return df
+
+    @classmethod
+    def _from_column_arrays(cls, col_arrays, column_order, index, object_data=None):
+        """Build DataFrame from {col: 1d_array} dict using _from_parts (JIT-safe)."""
+        # Group columns by dtype
+        dtype_groups: dict[np.dtype, list[tuple[str, jnp.ndarray]]] = {}
+        for col in column_order:
+            if col in col_arrays:
+                arr = col_arrays[col]
+                dt = np.dtype(arr.dtype)
+                if dt not in dtype_groups:
+                    dtype_groups[dt] = []
+                dtype_groups[dt].append((col, arr))
+
+        dtype_blocks = {}
+        column_to_block = {}
+        for dt, pairs in dtype_groups.items():
+            arrays = [a.reshape(-1, 1) for _, a in pairs]
+            dtype_blocks[dt] = jnp.concatenate(arrays, axis=1)
+            for idx, (col, _) in enumerate(pairs):
+                column_to_block[col] = (dt, idx)
+
+        return cls._from_parts(
+            dtype_blocks=dtype_blocks,
+            column_to_block=column_to_block,
+            object_data=object_data if object_data is not None else {},
+            index=index,
+            column_order=column_order,
+        )
 
 
 class _ILocIndexer:
@@ -2391,6 +2576,64 @@ class Series:
     def abs(self):
         """Absolute value."""
         return Series(jnp.abs(self._data), index=self._index, name=self._name)
+
+    def shift(self, periods: int = 1, fill_value=None):
+        """Shift data by n periods (JIT-compatible)."""
+        if fill_value is None:
+            fill_value = jnp.nan
+        n = len(self._data)
+        if periods == 0:
+            return Series(self._data, index=self._index, name=self._name)
+        if abs(periods) >= n:
+            return Series(jnp.full_like(self._data, fill_value), index=self._index, name=self._name)
+        if periods > 0:
+            pad = jnp.full((periods,), fill_value, dtype=self._data.dtype)
+            data = jnp.concatenate([pad, self._data[:-periods]])
+        else:
+            ap = abs(periods)
+            pad = jnp.full((ap,), fill_value, dtype=self._data.dtype)
+            data = jnp.concatenate([self._data[ap:], pad])
+        return Series(data, index=self._index, name=self._name)
+
+    def diff(self, periods: int = 1):
+        """First discrete difference (JIT-compatible)."""
+        shifted = self.shift(periods)
+        return Series(self._data - shifted._data, index=self._index, name=self._name)
+
+    def pct_change(self, periods: int = 1):
+        """Percentage change (JIT-compatible)."""
+        shifted = self.shift(periods)
+        result = (self._data - shifted._data) / shifted._data
+        return Series(result, index=self._index, name=self._name)
+
+    def pipe(self, func, *args, **kwargs):
+        """Apply a function to the Series. JIT-compatible if func is."""
+        return func(self, *args, **kwargs)
+
+    def between(self, left, right, inclusive="both"):
+        """Boolean mask for values between left and right (JIT-compatible)."""
+        d = self._data
+        if inclusive == "both":
+            mask = (d >= left) & (d <= right)
+        elif inclusive == "left":
+            mask = (d >= left) & (d < right)
+        elif inclusive == "right":
+            mask = (d > left) & (d <= right)
+        else:
+            mask = (d > left) & (d < right)
+        return Series(mask, index=self._index, name=self._name)
+
+    def map(self, func):
+        """Apply a function element-wise. JIT-compatible if func is JAX-compatible."""
+        return Series(func(self._data), index=self._index, name=self._name)
+
+    def replace(self, to_replace, value):
+        """Replace values. JIT-compatible for scalar replacements."""
+        return Series(
+            jnp.where(self._data == to_replace, value, self._data),
+            index=self._index,
+            name=self._name,
+        )
 
     def value_counts(self, sort=True):
         """Count occurrences of each unique value. Not JIT-compatible."""
@@ -2665,6 +2908,199 @@ class Rolling:
     def max(self):
         """Rolling maximum."""
         return self._apply(lambda g, nv: jnp.nanmax(g, axis=1))
+
+
+class Expanding:
+    """Expanding window operations. JIT-compatible — window grows from start."""
+
+    def __init__(self, df, min_periods: int = 1):
+        self._df = df
+        self._min_periods = min_periods
+
+    def _apply(self, fn):
+        """Apply expanding fn to each dtype block. Returns DataFrame."""
+        new_blocks = {}
+        n_rows = len(self._df._index)
+        # For expanding, window = row_index + 1, so row 0 has window 1, row 1 has window 2, etc.
+        # Build gather indices: for row i, gather rows [0..i], padding rest with 0
+        row_idx = jnp.arange(n_rows)
+        # (n_rows, n_rows) index matrix: each row i has [0,1,...,i, 0,0,...,0]
+        idx = jnp.broadcast_to(jnp.arange(n_rows)[None, :], (n_rows, n_rows))
+        idx = jnp.minimum(idx, row_idx[:, None])
+        # valid mask: position j is valid for row i if j <= i
+        valid = jnp.arange(n_rows)[None, :] <= row_idx[:, None]  # (n_rows, n_rows)
+        n_valid = row_idx + 1  # (n_rows,)
+
+        for dtype, block in self._df._dtype_blocks.items():
+            # gathered: (n_rows, n_rows, n_cols)
+            gathered = block[idx]
+            mask = valid[:, :, None]
+            gathered = jnp.where(mask, gathered, jnp.nan)
+            result = fn(gathered, n_valid)
+            result = jnp.where(n_valid[:, None] >= self._min_periods, result, jnp.nan)
+            new_blocks[result.dtype] = result
+
+        new_col_to_block = {}
+        for col, (old_dtype, col_idx) in self._df._column_to_block.items():
+            new_dtype = new_blocks[
+                next(
+                    nd
+                    for od, nd in zip(self._df._dtype_blocks.keys(), new_blocks.keys())
+                    if od == old_dtype
+                )
+            ].dtype
+            new_col_to_block[col] = (new_dtype, col_idx)
+
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
+
+    def sum(self):
+        """Expanding sum."""
+        return self._apply(lambda g, nv: jnp.nansum(g, axis=1))
+
+    def mean(self):
+        """Expanding mean."""
+        return self._apply(lambda g, nv: jnp.nanmean(g, axis=1))
+
+    def var(self, ddof: int = 1):
+        """Expanding variance."""
+        return self._apply(lambda g, nv: jnp.nanvar(g, axis=1, ddof=ddof))
+
+    def std(self, ddof: int = 1):
+        """Expanding standard deviation."""
+        return self._apply(lambda g, nv: jnp.nanstd(g, axis=1, ddof=ddof))
+
+    def min(self):
+        """Expanding minimum."""
+        return self._apply(lambda g, nv: jnp.nanmin(g, axis=1))
+
+    def max(self):
+        """Expanding maximum."""
+        return self._apply(lambda g, nv: jnp.nanmax(g, axis=1))
+
+
+class EWM:
+    """Exponentially weighted moving operations. JIT-compatible via scan."""
+
+    def __init__(self, df, alpha: float, min_periods: int = 0):
+        self._df = df
+        self._alpha = alpha
+        self._min_periods = min_periods
+
+    def _ewm_mean_block(self, block):
+        """Compute EWM mean using scan (JIT-compatible)."""
+        alpha = self._alpha
+
+        def _scan_fn(carry, x):
+            weighted_sum, total_weight = carry
+            weighted_sum = alpha * x + (1 - alpha) * weighted_sum
+            total_weight = alpha + (1 - alpha) * total_weight
+            return (weighted_sum, total_weight), weighted_sum / total_weight
+
+        n_cols = block.shape[1]
+        init = (jnp.zeros(n_cols), jnp.zeros(n_cols))
+        _, result = jax.lax.scan(_scan_fn, init, block)
+        return result
+
+    def _ewm_var_block(self, block):
+        """Compute EWM variance using scan (JIT-compatible)."""
+        alpha = self._alpha
+
+        def _scan_fn(carry, x):
+            old_mean, old_var, total_weight = carry
+            total_weight = alpha + (1 - alpha) * total_weight
+            new_mean = alpha * x + (1 - alpha) * old_mean
+            new_var = (1 - alpha) * (old_var + alpha * (x - old_mean) ** 2)
+            return (new_mean, new_var, total_weight), (new_var / total_weight, total_weight)
+
+        n_cols = block.shape[1]
+        init = (block[0], jnp.zeros(n_cols), jnp.zeros(n_cols))
+        _, (var_raw, weights) = jax.lax.scan(_scan_fn, init, block)
+        # Mask based on min_periods
+        row_idx = jnp.arange(block.shape[0])
+        result = jnp.where(row_idx[:, None] >= self._min_periods, var_raw, jnp.nan)
+        return result
+
+    def mean(self):
+        """Exponentially weighted moving mean."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            new_blocks[block.dtype] = self._ewm_mean_block(block)
+
+        new_col_to_block = {}
+        for col, (old_dtype, col_idx) in self._df._column_to_block.items():
+            new_dtype = new_blocks[
+                next(
+                    nd
+                    for od, nd in zip(self._df._dtype_blocks.keys(), new_blocks.keys())
+                    if od == old_dtype
+                )
+            ].dtype
+            new_col_to_block[col] = (new_dtype, col_idx)
+
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
+
+    def std(self, ddof: int = 1):
+        """Exponentially weighted moving standard deviation."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            var = self._ewm_var_block(block)
+            new_blocks[var.dtype] = jnp.sqrt(jnp.maximum(var, 0))
+
+        new_col_to_block = {}
+        for col, (old_dtype, col_idx) in self._df._column_to_block.items():
+            new_dtype = new_blocks[
+                next(
+                    nd
+                    for od, nd in zip(self._df._dtype_blocks.keys(), new_blocks.keys())
+                    if od == old_dtype
+                )
+            ].dtype
+            new_col_to_block[col] = (new_dtype, col_idx)
+
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
+
+    def var(self, ddof: int = 1):
+        """Exponentially weighted moving variance."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            new_blocks[block.dtype] = self._ewm_var_block(block)
+
+        new_col_to_block = {}
+        for col, (old_dtype, col_idx) in self._df._column_to_block.items():
+            new_dtype = new_blocks[
+                next(
+                    nd
+                    for od, nd in zip(self._df._dtype_blocks.keys(), new_blocks.keys())
+                    if od == old_dtype
+                )
+            ].dtype
+            new_col_to_block[col] = (new_dtype, col_idx)
+
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
 
 
 _TIME_UNITS = {

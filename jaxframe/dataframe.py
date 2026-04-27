@@ -493,6 +493,15 @@ class DataFrame:
         """Get numeric column dtypes (backward compatibility)."""
         return tuple(self._column_to_block[col][0] for col in self._numeric_cols)
 
+    def _all_numeric(self):
+        """Get all numeric data as a single flat array. Faster than values for scalar reductions."""
+        if not self._dtype_blocks:
+            raise ValueError("No numeric columns")
+        blocks = list(self._dtype_blocks.values())
+        if len(blocks) == 1:
+            return blocks[0]
+        return jnp.concatenate([b.reshape(-1) for b in blocks])
+
     # ========================================
     # Device management methods
     # ========================================
@@ -747,20 +756,17 @@ class DataFrame:
         Returns:
             Series (axis=0 or 1) or scalar (axis=None)
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to sum")
 
-        result = jnp.nansum(self._numeric_data, axis=axis)
+        if axis is None:
+            return jnp.nansum(self._all_numeric())
 
+        result = jnp.nansum(self._numeric_data, axis=axis)
         if axis == 0:
-            # Column-wise sum -> Series
             return Series(result, index=np.array(self._numeric_cols), name="sum")
-        elif axis == 1:
-            # Row-wise sum -> Series
-            return Series(result, index=self._index, name="sum")
         else:
-            # Total sum -> scalar
-            return result
+            return Series(result, index=self._index, name="sum")
 
     def mean(self, axis: int | None = 0):
         """
@@ -768,17 +774,17 @@ class DataFrame:
 
         Skips NaN values by default (matching pandas behavior).
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to compute mean")
 
-        result = jnp.nanmean(self._numeric_data, axis=axis)
+        if axis is None:
+            return jnp.nanmean(self._all_numeric())
 
+        result = jnp.nanmean(self._numeric_data, axis=axis)
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name="mean")
-        elif axis == 1:
-            return Series(result, index=self._index, name="mean")
         else:
-            return result
+            return Series(result, index=self._index, name="mean")
 
     def std(self, axis: int | None = 0, ddof: int = 1):
         """
@@ -790,17 +796,17 @@ class DataFrame:
             axis: 0 for column-wise, 1 for row-wise, None for total
             ddof: Delta degrees of freedom (default 1 for sample std)
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to compute std")
 
-        result = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
+        if axis is None:
+            return jnp.nanstd(self._all_numeric(), ddof=ddof)
 
+        result = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name="std")
-        elif axis == 1:
-            return Series(result, index=self._index, name="std")
         else:
-            return result
+            return Series(result, index=self._index, name="std")
 
     def var(self, axis: int | None = 0, ddof: int = 1):
         """
@@ -812,17 +818,17 @@ class DataFrame:
             axis: 0 for column-wise, 1 for row-wise, None for total
             ddof: Delta degrees of freedom (default 1 for sample variance)
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to compute variance")
 
-        result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
+        if axis is None:
+            return jnp.nanvar(self._all_numeric(), ddof=ddof)
 
+        result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name="var")
-        elif axis == 1:
-            return Series(result, index=self._index, name="var")
         else:
-            return result
+            return Series(result, index=self._index, name="var")
 
     def min(self, axis: int | None = 0):
         """
@@ -832,17 +838,17 @@ class DataFrame:
 
         Note: Gradient is non-smooth at the minimum point.
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to compute min")
 
-        result = jnp.nanmin(self._numeric_data, axis=axis)
+        if axis is None:
+            return jnp.nanmin(self._all_numeric())
 
+        result = jnp.nanmin(self._numeric_data, axis=axis)
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name="min")
-        elif axis == 1:
-            return Series(result, index=self._index, name="min")
         else:
-            return result
+            return Series(result, index=self._index, name="min")
 
     def max(self, axis: int | None = 0):
         """
@@ -852,17 +858,17 @@ class DataFrame:
 
         Note: Gradient is non-smooth at the maximum point.
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to compute max")
 
-        result = jnp.nanmax(self._numeric_data, axis=axis)
+        if axis is None:
+            return jnp.nanmax(self._all_numeric())
 
+        result = jnp.nanmax(self._numeric_data, axis=axis)
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name="max")
-        elif axis == 1:
-            return Series(result, index=self._index, name="max")
         else:
-            return result
+            return Series(result, index=self._index, name="max")
 
     def prod(self, axis: int | None = 0):
         """
@@ -870,17 +876,17 @@ class DataFrame:
 
         Skips NaN values by default (matching pandas behavior).
         """
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to compute product")
 
-        result = jnp.nanprod(self._numeric_data, axis=axis)
+        if axis is None:
+            return jnp.nanprod(self._all_numeric())
 
+        result = jnp.nanprod(self._numeric_data, axis=axis)
         if axis == 0:
             return Series(result, index=np.array(self._numeric_cols), name="prod")
-        elif axis == 1:
-            return Series(result, index=self._index, name="prod")
         else:
-            return result
+            return Series(result, index=self._index, name="prod")
 
     def abs(self):
         """Absolute value (JIT-compatible). Gradient is non-smooth at zero."""
@@ -2384,22 +2390,26 @@ class DataFrame:
         if isinstance(other, (int, float, bool, np.number)):
             # Scalar operation: apply to each block independently
             new_blocks = {}
+            dtype_map = {}  # old_dtype -> new_dtype
             for dtype, block in self._dtype_blocks.items():
-                # Determine result dtype
-                result_dtype = jnp.result_type(dtype, type(other))
-                new_blocks[np.dtype(result_dtype)] = op(block, other).astype(result_dtype)
+                result = op(block, other)
+                new_dtype = np.dtype(result.dtype)
+                new_blocks[new_dtype] = result
+                dtype_map[dtype] = new_dtype
 
-            # Rebuild column mapping if dtype changed
-            new_column_to_block = {}
-            for col, (old_dtype, idx) in self._column_to_block.items():
-                result_dtype = jnp.result_type(old_dtype, type(other))
-                new_column_to_block[col] = (np.dtype(result_dtype), idx)
+            if all(k == v for k, v in dtype_map.items()):
+                new_column_to_block = self._column_to_block
+            else:
+                new_column_to_block = {
+                    col: (dtype_map[old_dtype], idx)
+                    for col, (old_dtype, idx) in self._column_to_block.items()
+                }
 
             return DataFrame._from_parts(
                 dtype_blocks=new_blocks,
                 column_to_block=new_column_to_block,
-                object_data=self._object_data.copy(),
-                index=self._index.copy(),
+                object_data=self._object_data,
+                index=self._index,
                 column_order=self._column_order,
             )
 
@@ -2411,19 +2421,25 @@ class DataFrame:
             # Fast path: same block structure — operate block-by-block
             if self._column_to_block == other._column_to_block:
                 new_blocks = {}
-                new_col_to_block = {}
+                dtype_map = {}
                 for dtype, block in self._dtype_blocks.items():
-                    other_block = other._dtype_blocks[dtype]
-                    result_dtype = jnp.result_type(dtype, dtype)
-                    new_blocks[np.dtype(result_dtype)] = op(block, other_block)
-                for col, (old_dtype, idx) in self._column_to_block.items():
-                    result_dtype = jnp.result_type(old_dtype, old_dtype)
-                    new_col_to_block[col] = (np.dtype(result_dtype), idx)
+                    result = op(block, other._dtype_blocks[dtype])
+                    new_dtype = np.dtype(result.dtype)
+                    new_blocks[new_dtype] = result
+                    dtype_map[dtype] = new_dtype
+
+                if all(k == v for k, v in dtype_map.items()):
+                    new_col_to_block = self._column_to_block
+                else:
+                    new_col_to_block = {
+                        col: (dtype_map[old_dtype], idx)
+                        for col, (old_dtype, idx) in self._column_to_block.items()
+                    }
                 return DataFrame._from_parts(
                     dtype_blocks=new_blocks,
                     column_to_block=new_col_to_block,
-                    object_data=self._object_data.copy(),
-                    index=self._index.copy(),
+                    object_data=self._object_data,
+                    index=self._index,
                     column_order=self._column_order,
                 )
 

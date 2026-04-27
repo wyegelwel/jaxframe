@@ -3652,6 +3652,47 @@ class DataFrameGroupBy:
 # ========================================
 
 
+class _DataFrameAux:
+    """Hashable aux_data for DataFrame pytree registration.
+
+    JAX requires aux_data to be hashable and have simple equality semantics
+    for its JIT compilation cache. This wraps DataFrame metadata into a
+    hashable, comparable container.
+    """
+
+    __slots__ = (
+        "dtypes_order",
+        "column_to_block",
+        "object_data_keys",
+        "index_tuple",
+        "column_order",
+        "_object_data_arrays",
+    )
+
+    def __init__(self, dtypes_order, column_to_block, object_data, index, column_order):
+        self.dtypes_order = dtypes_order
+        # Convert to frozenset of tuples for hashability
+        self.column_to_block = tuple(sorted(column_to_block.items()))
+        self.object_data_keys = tuple(sorted(object_data.keys()))
+        self.index_tuple = tuple(index.tolist()) if len(index) <= 10000 else (len(index),)
+        self.column_order = tuple(column_order) if not isinstance(column_order, tuple) else column_order
+        # Keep original references for unflatten
+        self._object_data_arrays = object_data
+
+    def __hash__(self):
+        return hash((self.dtypes_order, self.column_to_block, self.index_tuple, self.column_order))
+
+    def __eq__(self, other):
+        if not isinstance(other, _DataFrameAux):
+            return NotImplemented
+        return (
+            self.dtypes_order == other.dtypes_order
+            and self.column_to_block == other.column_to_block
+            and self.index_tuple == other.index_tuple
+            and self.column_order == other.column_order
+        )
+
+
 def _dataframe_flatten(df: DataFrame):
     """
     Flatten DataFrame for JAX transformations (dtype blocks version).
@@ -3665,31 +3706,29 @@ def _dataframe_flatten(df: DataFrame):
     children = tuple(block for _, block in dtype_items)
     dtypes_order = tuple(dtype for dtype, _ in dtype_items)
 
-    # Aux data: metadata that doesn't participate in JAX ops
-    aux_data = {
-        "dtypes_order": dtypes_order,
-        "column_to_block": df._column_to_block,
-        "object_data": df._object_data,
-        "index": df._index,
-        "column_order": df._column_order,
-    }
+    aux_data = _DataFrameAux(
+        dtypes_order=dtypes_order,
+        column_to_block=df._column_to_block,
+        object_data=df._object_data,
+        index=df._index,
+        column_order=df._column_order,
+    )
 
     return children, aux_data
 
 
 def _dataframe_unflatten(aux_data, children):
     """Reconstruct DataFrame from flattened representation (dtype blocks version)."""
-    # Reconstruct dtype_blocks from children and dtypes_order
     dtype_blocks = {}
-    for dtype, block in zip(aux_data["dtypes_order"], children):
+    for dtype, block in zip(aux_data.dtypes_order, children):
         dtype_blocks[dtype] = block
 
     return DataFrame._from_parts(
         dtype_blocks=dtype_blocks,
-        column_to_block=aux_data["column_to_block"],
-        object_data=aux_data["object_data"],
-        index=aux_data["index"],
-        column_order=aux_data["column_order"],
+        column_to_block=dict(aux_data.column_to_block),
+        object_data=aux_data._object_data_arrays,
+        index=np.arange(children[0].shape[0]) if children else np.array([]),
+        column_order=list(aux_data.column_order),
     )
 
 
@@ -3701,20 +3740,36 @@ jax.tree_util.register_pytree_node(
 )
 
 
+class _SeriesAux:
+    """Hashable aux_data for Series pytree registration."""
+
+    __slots__ = ("index_tuple", "name", "_index_array")
+
+    def __init__(self, index, name):
+        self.index_tuple = tuple(index.tolist()) if len(index) <= 10000 else (len(index),)
+        self.name = name
+        self._index_array = index
+
+    def __hash__(self):
+        return hash((self.index_tuple, self.name))
+
+    def __eq__(self, other):
+        if not isinstance(other, _SeriesAux):
+            return NotImplemented
+        return self.index_tuple == other.index_tuple and self.name == other.name
+
+
 def _series_flatten(series: Series):
     """Flatten Series for JAX transformations."""
     children = (series._data,)
-    aux_data = {
-        "index": series._index,
-        "name": series._name,
-    }
+    aux_data = _SeriesAux(series._index, series._name)
     return children, aux_data
 
 
 def _series_unflatten(aux_data, children):
     """Reconstruct Series from flattened representation."""
     (data,) = children
-    return Series(data, index=aux_data["index"], name=aux_data["name"])
+    return Series(data, index=aux_data._index_array, name=aux_data.name)
 
 
 # Register Series as a JAX pytree
@@ -3725,16 +3780,35 @@ jax.tree_util.register_pytree_node(
 )
 
 
+class _SeriesGroupByAux:
+    """Hashable aux_data for SeriesGroupBy pytree registration."""
+
+    __slots__ = ("_segment_ids", "_num_groups", "_group_keys", "_name")
+
+    def __init__(self, segment_ids, num_groups, group_keys, name):
+        self._segment_ids = segment_ids
+        self._num_groups = num_groups
+        self._group_keys = group_keys
+        self._name = name
+
+    def __hash__(self):
+        return hash((self._num_groups, self._name, len(self._segment_ids)))
+
+    def __eq__(self, other):
+        if not isinstance(other, _SeriesGroupByAux):
+            return NotImplemented
+        return (
+            self._num_groups == other._num_groups
+            and self._name == other._name
+            and len(self._segment_ids) == len(other._segment_ids)
+        )
+
+
 def _series_groupby_flatten(sgb):
     """Flatten SeriesGroupBy for JAX — only data is a differentiable leaf.
     segment_ids goes in aux (static) since it's integer indexing, not differentiable."""
     children = (sgb._data,)
-    aux = {
-        "segment_ids": sgb._segment_ids,
-        "num_groups": sgb._num_groups,
-        "group_keys": sgb._group_keys,
-        "name": sgb._name,
-    }
+    aux = _SeriesGroupByAux(sgb._segment_ids, sgb._num_groups, sgb._group_keys, sgb._name)
     return children, aux
 
 
@@ -3742,10 +3816,10 @@ def _series_groupby_unflatten(aux, children):
     (data,) = children
     return SeriesGroupBy(
         data=data,
-        segment_ids=aux["segment_ids"],
-        num_groups=aux["num_groups"],
-        group_keys=aux["group_keys"],
-        name=aux["name"],
+        segment_ids=aux._segment_ids,
+        num_groups=aux._num_groups,
+        group_keys=aux._group_keys,
+        name=aux._name,
     )
 
 

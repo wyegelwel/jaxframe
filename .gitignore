@@ -51,3 +51,6 @@ dmypy.json
 
 # JAX
 .jax_cache/
+
+# Benchmark results
+benchmarks/results/

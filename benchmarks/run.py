@@ -342,7 +342,7 @@ CATEGORIES = [
     Category(key="cumulative", label="Cumulative Operations", ops=_make_cumulative()),
     Category(key="shift_diff", label="Shift & Diff", ops=_make_shift_diff()),
     Category(key="rolling", label="Rolling Windows", ops=_make_rolling()),
-    Category(key="expanding", label="Expanding Windows", ops=_make_expanding(), max_rows=10_000),
+    Category(key="expanding", label="Expanding Windows", ops=_make_expanding()),
     Category(key="ewm", label="Exponentially Weighted", ops=_make_ewm()),
     Category(key="data_cleaning", label="Data Cleaning", ops=_make_data_cleaning()),
     Category(key="sorting", label="Sorting", ops=_make_sorting()),

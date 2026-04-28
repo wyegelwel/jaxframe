@@ -540,6 +540,12 @@ class DataFrame:
             column_order=self._column_order,
         )
 
+    def block_until_ready(self):
+        """Block until all underlying JAX arrays are materialized."""
+        for block in self._dtype_blocks.values():
+            block.block_until_ready()
+        return self
+
     def to_gpu(self, id: int = 0):
         """
         Transfer DataFrame to GPU.
@@ -1952,12 +1958,22 @@ class DataFrame:
         Computes self - self.shift(periods). NaN where shift introduces gaps.
         """
         shifted = self.shift(periods)
-        col_arrays = {}
-        for col in self._column_order:
-            if col in self._column_to_block:
-                col_arrays[col] = self._get_column_data(col) - shifted._get_column_data(col)
-        return DataFrame._from_column_arrays(
-            col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
+        new_blocks = {}
+        new_col_to_block = {}
+        for (orig_dtype, block), (shifted_dtype, shifted_block) in zip(
+            self._dtype_blocks.items(), shifted._dtype_blocks.items()
+        ):
+            result = block - shifted_block
+            new_blocks[result.dtype] = result
+            for col, (col_dtype, idx) in self._column_to_block.items():
+                if col_dtype == orig_dtype:
+                    new_col_to_block[col] = (result.dtype, idx)
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._object_data,
+            index=self._index,
+            column_order=self._column_order,
         )
 
     def pct_change(self, periods: int = 1):
@@ -1967,13 +1983,22 @@ class DataFrame:
         Computes (self - self.shift(periods)) / self.shift(periods).
         """
         shifted = self.shift(periods)
-        col_arrays = {}
-        for col in self._column_order:
-            if col in self._column_to_block:
-                s = shifted._get_column_data(col)
-                col_arrays[col] = (self._get_column_data(col) - s) / s
-        return DataFrame._from_column_arrays(
-            col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
+        new_blocks = {}
+        new_col_to_block = {}
+        for (orig_dtype, block), (shifted_dtype, shifted_block) in zip(
+            self._dtype_blocks.items(), shifted._dtype_blocks.items()
+        ):
+            result = (block - shifted_block) / shifted_block
+            new_blocks[result.dtype] = result
+            for col, (col_dtype, idx) in self._column_to_block.items():
+                if col_dtype == orig_dtype:
+                    new_col_to_block[col] = (result.dtype, idx)
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._object_data,
+            index=self._index,
+            column_order=self._column_order,
         )
 
     def where(self, condition, fill_value):
@@ -2733,6 +2758,12 @@ class Series:
         """Return underlying array."""
         return self._data
 
+    def block_until_ready(self):
+        """Block until underlying JAX array is materialized."""
+        if hasattr(self._data, "block_until_ready"):
+            self._data.block_until_ready()
+        return self
+
     @property
     def name(self):
         """Return series name."""
@@ -3147,46 +3178,18 @@ class Rolling:
 
 
 class Expanding:
-    """Expanding window operations. JIT-compatible — window grows from start."""
+    """Expanding window operations. JIT-compatible via jax.lax.scan — O(n)."""
 
     def __init__(self, df, min_periods: int = 1):
         self._df = df
         self._min_periods = min_periods
 
-    def _apply(self, fn):
-        """Apply expanding fn to each dtype block. Returns DataFrame."""
-        new_blocks = {}
-        n_rows = len(self._df._index)
-        # For expanding, window = row_index + 1, so row 0 has window 1, row 1 has window 2, etc.
-        # Build gather indices: for row i, gather rows [0..i], padding rest with 0
-        row_idx = jnp.arange(n_rows)
-        # (n_rows, n_rows) index matrix: each row i has [0,1,...,i, 0,0,...,0]
-        idx = jnp.broadcast_to(jnp.arange(n_rows)[None, :], (n_rows, n_rows))
-        idx = jnp.minimum(idx, row_idx[:, None])
-        # valid mask: position j is valid for row i if j <= i
-        valid = jnp.arange(n_rows)[None, :] <= row_idx[:, None]  # (n_rows, n_rows)
-        n_valid = row_idx + 1  # (n_rows,)
-
-        for dtype, block in self._df._dtype_blocks.items():
-            # gathered: (n_rows, n_rows, n_cols)
-            gathered = block[idx]
-            mask = valid[:, :, None]
-            gathered = jnp.where(mask, gathered, jnp.nan)
-            result = fn(gathered, n_valid)
-            result = jnp.where(n_valid[:, None] >= self._min_periods, result, jnp.nan)
-            new_blocks[result.dtype] = result
-
+    def _build_result(self, new_blocks):
+        """Build DataFrame from new dtype blocks, remapping column_to_block."""
+        dtype_map = dict(zip(self._df._dtype_blocks.keys(), new_blocks.keys()))
         new_col_to_block = {}
         for col, (old_dtype, col_idx) in self._df._column_to_block.items():
-            new_dtype = new_blocks[
-                next(
-                    nd
-                    for od, nd in zip(self._df._dtype_blocks.keys(), new_blocks.keys())
-                    if od == old_dtype
-                )
-            ].dtype
-            new_col_to_block[col] = (new_dtype, col_idx)
-
+            new_col_to_block[col] = (dtype_map[old_dtype], col_idx)
         return DataFrame._from_parts(
             dtype_blocks=new_blocks,
             column_to_block=new_col_to_block,
@@ -3195,29 +3198,143 @@ class Expanding:
             column_order=self._df._column_order,
         )
 
+    def _sum_block(self, block):
+        min_periods = self._min_periods
+
+        def scan_fn(carry, x):
+            running_sum, count = carry
+            is_valid = ~jnp.isnan(x)
+            running_sum = running_sum + jnp.where(is_valid, x, 0.0)
+            count = count + is_valid.astype(jnp.int32)
+            result = jnp.where(count >= min_periods, running_sum, jnp.nan)
+            return (running_sum, count), result
+
+        n_cols = block.shape[1]
+        init = (jnp.zeros(n_cols, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
+        _, result = jax.lax.scan(scan_fn, init, block)
+        return result
+
+    def _mean_block(self, block):
+        min_periods = self._min_periods
+
+        def scan_fn(carry, x):
+            running_sum, count = carry
+            is_valid = ~jnp.isnan(x)
+            running_sum = running_sum + jnp.where(is_valid, x, 0.0)
+            count = count + is_valid.astype(jnp.int32)
+            mean = running_sum / jnp.maximum(count, 1)
+            result = jnp.where(count >= min_periods, mean, jnp.nan)
+            return (running_sum, count), result
+
+        n_cols = block.shape[1]
+        init = (jnp.zeros(n_cols, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
+        _, result = jax.lax.scan(scan_fn, init, block)
+        return result
+
+    def _var_block(self, block, ddof=1):
+        min_periods = self._min_periods
+
+        def scan_fn(carry, x):
+            mean, m2, count = carry
+            is_valid = ~jnp.isnan(x)
+            safe_x = jnp.where(is_valid, x, 0.0)
+            new_count = count + is_valid.astype(count.dtype)
+            delta = safe_x - mean
+            safe_count = jnp.maximum(new_count, 1)
+            new_mean = jnp.where(is_valid, mean + delta / safe_count, mean)
+            delta2 = safe_x - new_mean
+            new_m2 = jnp.where(is_valid, m2 + delta * delta2, m2)
+            denom = jnp.maximum(new_count - ddof, 1)
+            var = new_m2 / denom
+            result = jnp.where((new_count >= min_periods) & (new_count > ddof), var, jnp.nan)
+            return (new_mean, new_m2, new_count), result
+
+        n_cols = block.shape[1]
+        init = (
+            jnp.zeros(n_cols, dtype=block.dtype),
+            jnp.zeros(n_cols, dtype=block.dtype),
+            jnp.zeros(n_cols, dtype=jnp.float32),
+        )
+        _, result = jax.lax.scan(scan_fn, init, block)
+        return result
+
+    def _min_block(self, block):
+        min_periods = self._min_periods
+
+        def scan_fn(carry, x):
+            running_min, count = carry
+            is_valid = ~jnp.isnan(x)
+            candidate = jnp.where(is_valid, jnp.minimum(running_min, x), running_min)
+            count = count + is_valid.astype(jnp.int32)
+            result = jnp.where(count >= min_periods, candidate, jnp.nan)
+            return (candidate, count), result
+
+        n_cols = block.shape[1]
+        init = (jnp.full(n_cols, jnp.inf, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
+        _, result = jax.lax.scan(scan_fn, init, block)
+        return result
+
+    def _max_block(self, block):
+        min_periods = self._min_periods
+
+        def scan_fn(carry, x):
+            running_max, count = carry
+            is_valid = ~jnp.isnan(x)
+            candidate = jnp.where(is_valid, jnp.maximum(running_max, x), running_max)
+            count = count + is_valid.astype(jnp.int32)
+            result = jnp.where(count >= min_periods, candidate, jnp.nan)
+            return (candidate, count), result
+
+        n_cols = block.shape[1]
+        init = (
+            jnp.full(n_cols, -jnp.inf, dtype=block.dtype),
+            jnp.zeros(n_cols, dtype=jnp.int32),
+        )
+        _, result = jax.lax.scan(scan_fn, init, block)
+        return result
+
     def sum(self):
-        """Expanding sum."""
-        return self._apply(lambda g, nv: jnp.nansum(g, axis=1))
+        """Expanding sum via scan — O(n)."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            new_blocks[block.dtype] = self._sum_block(block)
+        return self._build_result(new_blocks)
 
     def mean(self):
-        """Expanding mean."""
-        return self._apply(lambda g, nv: jnp.nanmean(g, axis=1))
+        """Expanding mean via scan — O(n)."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            new_blocks[block.dtype] = self._mean_block(block)
+        return self._build_result(new_blocks)
 
     def var(self, ddof: int = 1):
-        """Expanding variance."""
-        return self._apply(lambda g, nv: jnp.nanvar(g, axis=1, ddof=ddof))
+        """Expanding variance via Welford's algorithm — O(n)."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            new_blocks[block.dtype] = self._var_block(block, ddof)
+        return self._build_result(new_blocks)
 
     def std(self, ddof: int = 1):
-        """Expanding standard deviation."""
-        return self._apply(lambda g, nv: jnp.nanstd(g, axis=1, ddof=ddof))
+        """Expanding std via Welford's algorithm — O(n)."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            var = self._var_block(block, ddof)
+            new_blocks[var.dtype] = jnp.sqrt(jnp.maximum(var, 0))
+        return self._build_result(new_blocks)
 
     def min(self):
-        """Expanding minimum."""
-        return self._apply(lambda g, nv: jnp.nanmin(g, axis=1))
+        """Expanding min via scan — O(n)."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            new_blocks[block.dtype] = self._min_block(block)
+        return self._build_result(new_blocks)
 
     def max(self):
-        """Expanding maximum."""
-        return self._apply(lambda g, nv: jnp.nanmax(g, axis=1))
+        """Expanding max via scan — O(n)."""
+        new_blocks = {}
+        for dtype, block in self._df._dtype_blocks.items():
+            new_blocks[block.dtype] = self._max_block(block)
+        return self._build_result(new_blocks)
 
 
 class EWM:
@@ -3675,7 +3792,9 @@ class _DataFrameAux:
         self.column_to_block = tuple(sorted(column_to_block.items()))
         self.object_data_keys = tuple(sorted(object_data.keys()))
         self.index_tuple = tuple(index.tolist()) if len(index) <= 10000 else (len(index),)
-        self.column_order = tuple(column_order) if not isinstance(column_order, tuple) else column_order
+        self.column_order = (
+            tuple(column_order) if not isinstance(column_order, tuple) else column_order
+        )
         # Keep original references for unflatten
         self._object_data_arrays = object_data
 

@@ -810,33 +810,31 @@ class DataFrame:
     @staticmethod
     @jax.jit
     def _fast_nanmean(block):
-        """NaN-skipping mean via two fused lax.reduce passes (sum + count)."""
-        def nan_add(a, b):
-            return (
-                jnp.where(jnp.isnan(a), 0.0, a)
-                + jnp.where(jnp.isnan(b), 0.0, b)
-            )
+        """NaN-skipping mean via single-pass multi-operand lax.reduce."""
+        clean = jnp.where(jnp.isnan(block), 0.0, block)
         valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
-        total = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
-        count = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
+        def combiner(a, b):
+            return (a[0] + b[0], a[1] + b[1])
+        total, count = jax.lax.reduce(
+            (clean, valid),
+            (jnp.float32(0.0), jnp.float32(0.0)),
+            combiner, [0],
+        )
         return total / jnp.maximum(count, 1)
 
     @staticmethod
     @jax.jit
     def _fast_nanvar(block, ddof):
-        """NaN-skipping variance via three fused lax.reduce passes."""
-        def nan_add(a, b):
-            return (
-                jnp.where(jnp.isnan(a), 0.0, a)
-                + jnp.where(jnp.isnan(b), 0.0, b)
-            )
-        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+        """NaN-skipping variance via single-pass multi-operand lax.reduce."""
         clean = jnp.where(jnp.isnan(block), 0.0, block)
-        total = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
-        total_sq = jax.lax.reduce(
-            clean * clean, jnp.float32(0.0), jax.lax.add, [0]
+        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+        def combiner(a, b):
+            return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+        total, total_sq, count = jax.lax.reduce(
+            (clean, clean * clean, valid),
+            (jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0)),
+            combiner, [0],
         )
-        count = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
         mean = total / jnp.maximum(count, 1)
         return (total_sq - count * mean * mean) / jnp.maximum(count - ddof, 1)
 
@@ -896,7 +894,8 @@ class DataFrame:
             raise ValueError("No numeric columns to compute mean")
 
         if axis is None:
-            # Block-level fast nansum + nancount, then combine
+            # Use _fast_nansum (grad-safe) rather than _fast_nanmean
+            # (multi-operand lax.reduce doesn't support backward pass)
             total_sum = jnp.float32(0.0)
             total_count = jnp.float32(0.0)
             for block in self._dtype_blocks.values():
@@ -948,10 +947,18 @@ class DataFrame:
             raise ValueError("No numeric columns to compute variance")
 
         if axis is None:
-            # Flatten all numeric data and compute scalar variance
-            all_data = self._all_numeric()
-            flat = all_data.reshape(-1, 1)
-            return self._fast_nanvar(flat, jnp.float32(ddof))[0]
+            # Use _fast_nansum (grad-safe) rather than _fast_nanvar
+            # (multi-operand lax.reduce doesn't support backward pass)
+            total_sum = jnp.float32(0.0)
+            total_sumsq = jnp.float32(0.0)
+            total_count = jnp.float32(0.0)
+            for block in self._dtype_blocks.values():
+                total_sum = total_sum + self._fast_nansum(block).sum()
+                total_sumsq = total_sumsq + self._fast_nansum(block * block).sum()
+                valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+                total_count = total_count + valid.sum()
+            mean = total_sum / jnp.maximum(total_count, 1)
+            return (total_sumsq - total_count * mean * mean) / jnp.maximum(total_count - ddof, 1)
 
         if axis == 0:
             ddof_arr = jnp.float32(ddof)

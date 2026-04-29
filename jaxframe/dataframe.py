@@ -750,6 +750,26 @@ class DataFrame:
             # Handle JAX arrays
             return self.values @ other
 
+    def _reduce_axis0(self, fn, name):
+        """Reduce each dtype block along axis=0 and assemble into a Series.
+
+        Avoids building a full promoted matrix via .values — reduces each
+        block independently and concatenates the small 1D results.
+        """
+        numeric_cols = self._numeric_cols
+        if len(self._dtype_blocks) == 1:
+            block = next(iter(self._dtype_blocks.values()))
+            return Series(fn(block), index=np.array(numeric_cols), name=name)
+        # Multi-dtype: reduce each block, build result in column order
+        block_results = {}
+        for dtype, block in self._dtype_blocks.items():
+            block_results[dtype] = fn(block)
+        parts = []
+        for col in numeric_cols:
+            dtype, idx = self._column_to_block[col]
+            parts.append(block_results[dtype][idx : idx + 1])
+        return Series(jnp.concatenate(parts), index=np.array(numeric_cols), name=name)
+
     def sum(self, axis: int | None = 0):
         """
         Sum along axis (JIT-compatible).
@@ -768,11 +788,10 @@ class DataFrame:
         if axis is None:
             return jnp.nansum(self._all_numeric())
 
-        result = jnp.nansum(self._numeric_data, axis=axis)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="sum")
-        else:
-            return Series(result, index=self._index, name="sum")
+            return self._reduce_axis0(lambda b: jnp.nansum(b, axis=0), "sum")
+        result = jnp.nansum(self._numeric_data, axis=axis)
+        return Series(result, index=self._index, name="sum")
 
     def mean(self, axis: int | None = 0):
         """
@@ -786,11 +805,10 @@ class DataFrame:
         if axis is None:
             return jnp.nanmean(self._all_numeric())
 
-        result = jnp.nanmean(self._numeric_data, axis=axis)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="mean")
-        else:
-            return Series(result, index=self._index, name="mean")
+            return self._reduce_axis0(lambda b: jnp.nanmean(b, axis=0), "mean")
+        result = jnp.nanmean(self._numeric_data, axis=axis)
+        return Series(result, index=self._index, name="mean")
 
     def std(self, axis: int | None = 0, ddof: int = 1):
         """
@@ -808,11 +826,10 @@ class DataFrame:
         if axis is None:
             return jnp.nanstd(self._all_numeric(), ddof=ddof)
 
-        result = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="std")
-        else:
-            return Series(result, index=self._index, name="std")
+            return self._reduce_axis0(lambda b: jnp.nanstd(b, axis=0, ddof=ddof), "std")
+        result = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
+        return Series(result, index=self._index, name="std")
 
     def var(self, axis: int | None = 0, ddof: int = 1):
         """
@@ -830,11 +847,10 @@ class DataFrame:
         if axis is None:
             return jnp.nanvar(self._all_numeric(), ddof=ddof)
 
-        result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="var")
-        else:
-            return Series(result, index=self._index, name="var")
+            return self._reduce_axis0(lambda b: jnp.nanvar(b, axis=0, ddof=ddof), "var")
+        result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
+        return Series(result, index=self._index, name="var")
 
     def min(self, axis: int | None = 0):
         """
@@ -850,11 +866,10 @@ class DataFrame:
         if axis is None:
             return jnp.nanmin(self._all_numeric())
 
-        result = jnp.nanmin(self._numeric_data, axis=axis)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="min")
-        else:
-            return Series(result, index=self._index, name="min")
+            return self._reduce_axis0(lambda b: jnp.nanmin(b, axis=0), "min")
+        result = jnp.nanmin(self._numeric_data, axis=axis)
+        return Series(result, index=self._index, name="min")
 
     def max(self, axis: int | None = 0):
         """
@@ -870,11 +885,10 @@ class DataFrame:
         if axis is None:
             return jnp.nanmax(self._all_numeric())
 
-        result = jnp.nanmax(self._numeric_data, axis=axis)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="max")
-        else:
-            return Series(result, index=self._index, name="max")
+            return self._reduce_axis0(lambda b: jnp.nanmax(b, axis=0), "max")
+        result = jnp.nanmax(self._numeric_data, axis=axis)
+        return Series(result, index=self._index, name="max")
 
     def prod(self, axis: int | None = 0):
         """
@@ -888,11 +902,10 @@ class DataFrame:
         if axis is None:
             return jnp.nanprod(self._all_numeric())
 
-        result = jnp.nanprod(self._numeric_data, axis=axis)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="prod")
-        else:
-            return Series(result, index=self._index, name="prod")
+            return self._reduce_axis0(lambda b: jnp.nanprod(b, axis=0), "prod")
+        result = jnp.nanprod(self._numeric_data, axis=axis)
+        return Series(result, index=self._index, name="prod")
 
     def abs(self):
         """Absolute value (JIT-compatible). Gradient is non-smooth at zero."""
@@ -1084,13 +1097,12 @@ class DataFrame:
 
     def median(self, axis: int = 0):
         """Median along axis (JIT-compatible). Gradient is non-smooth."""
-        if self._numeric_data is None:
+        if not self._dtype_blocks:
             raise ValueError("No numeric columns to compute median")
-        result = jnp.nanmedian(self._numeric_data, axis=axis)
         if axis == 0:
-            return Series(result, index=np.array(self._numeric_cols), name="median")
-        else:
-            return Series(result, index=self._index, name="median")
+            return self._reduce_axis0(lambda b: jnp.nanmedian(b, axis=0), "median")
+        result = jnp.nanmedian(self._numeric_data, axis=axis)
+        return Series(result, index=self._index, name="median")
 
     def _apply_blockwise(self, fn):
         """Apply fn to each dtype block, return new DataFrame via _from_parts."""

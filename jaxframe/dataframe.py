@@ -807,6 +807,39 @@ class DataFrame:
             )
         return jax.lax.reduce(block, jnp.float32(1.0), combiner, [0])
 
+    @staticmethod
+    @jax.jit
+    def _fast_nanmean(block):
+        """NaN-skipping mean via two fused lax.reduce passes (sum + count)."""
+        def nan_add(a, b):
+            return (
+                jnp.where(jnp.isnan(a), 0.0, a)
+                + jnp.where(jnp.isnan(b), 0.0, b)
+            )
+        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+        total = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
+        count = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
+        return total / jnp.maximum(count, 1)
+
+    @staticmethod
+    @jax.jit
+    def _fast_nanvar(block, ddof):
+        """NaN-skipping variance via three fused lax.reduce passes."""
+        def nan_add(a, b):
+            return (
+                jnp.where(jnp.isnan(a), 0.0, a)
+                + jnp.where(jnp.isnan(b), 0.0, b)
+            )
+        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+        clean = jnp.where(jnp.isnan(block), 0.0, block)
+        total = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
+        total_sq = jax.lax.reduce(
+            clean * clean, jnp.float32(0.0), jax.lax.add, [0]
+        )
+        count = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
+        mean = total / jnp.maximum(count, 1)
+        return (total_sq - count * mean * mean) / jnp.maximum(count - ddof, 1)
+
     def _reduce_axis0(self, fn, name):
         """Reduce each dtype block along axis=0 and assemble into a Series.
 
@@ -863,10 +896,17 @@ class DataFrame:
             raise ValueError("No numeric columns to compute mean")
 
         if axis is None:
-            return jnp.nanmean(self._all_numeric())
+            # Block-level fast nansum + nancount, then combine
+            total_sum = jnp.float32(0.0)
+            total_count = jnp.float32(0.0)
+            for block in self._dtype_blocks.values():
+                total_sum = total_sum + self._fast_nansum(block).sum()
+                valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+                total_count = total_count + valid.sum()
+            return total_sum / jnp.maximum(total_count, 1)
 
         if axis == 0:
-            return self._reduce_axis0(lambda b: jnp.nanmean(b, axis=0), "mean")
+            return self._reduce_axis0(self._fast_nanmean, "mean")
         result = jnp.nanmean(self._numeric_data, axis=axis)
         return Series(result, index=self._index, name="mean")
 
@@ -884,10 +924,13 @@ class DataFrame:
             raise ValueError("No numeric columns to compute std")
 
         if axis is None:
-            return jnp.nanstd(self._all_numeric(), ddof=ddof)
+            return jnp.sqrt(self.var(axis=None, ddof=ddof))
 
         if axis == 0:
-            return self._reduce_axis0(lambda b: jnp.nanstd(b, axis=0, ddof=ddof), "std")
+            ddof_arr = jnp.float32(ddof)
+            return self._reduce_axis0(
+                lambda b: jnp.sqrt(jnp.maximum(self._fast_nanvar(b, ddof_arr), 0)), "std"
+            )
         result = jnp.nanstd(self._numeric_data, axis=axis, ddof=ddof)
         return Series(result, index=self._index, name="std")
 
@@ -905,10 +948,16 @@ class DataFrame:
             raise ValueError("No numeric columns to compute variance")
 
         if axis is None:
-            return jnp.nanvar(self._all_numeric(), ddof=ddof)
+            # Flatten all numeric data and compute scalar variance
+            all_data = self._all_numeric()
+            flat = all_data.reshape(-1, 1)
+            return self._fast_nanvar(flat, jnp.float32(ddof))[0]
 
         if axis == 0:
-            return self._reduce_axis0(lambda b: jnp.nanvar(b, axis=0, ddof=ddof), "var")
+            ddof_arr = jnp.float32(ddof)
+            return self._reduce_axis0(
+                lambda b: self._fast_nanvar(b, ddof_arr), "var"
+            )
         result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
         return Series(result, index=self._index, name="var")
 

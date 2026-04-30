@@ -65,6 +65,9 @@ Pandas vs jaxframe (eager and JIT) at various data sizes. JaxFrame+JIT should be
 | `tests/test_pandas_mirror.py` | Parametrized pandas equivalence tests |
 | `tests/test_jax_transforms.py` | JIT/grad compatibility matrix |
 | `tests/test_benchmarks.py` | Performance comparison runner |
+| `docs/JOURNAL.md` | Development journal — optimization findings, lessons learned |
+
+**Keep `docs/JOURNAL.md` updated** during and after tasks. Record what was tried, what worked, what didn't, and why. This is how we learn from past work and avoid repeating mistakes.
 
 ## Non-Differentiable Operations
 
@@ -89,6 +92,17 @@ All ops are JIT-compatible. The following are **not** differentiable (`jax.grad`
 Everything else (sum, mean, std, var, arithmetic, clip, where, fillna, cumsum, cumprod, shift, apply, reverse ops, groupby.sum/mean/std/var, transform) **is differentiable**.
 
 When adding new ops, update this table. If an op is non-differentiable, document why.
+
+## Roadmap
+
+Priority order:
+
+1. **np → jnp audit** — Many eager ops still use `np.*` which forces data to CPU. Audit and migrate to `jnp.*` so the entire library is GPU-native. Key targets: `duplicated`, `value_counts`, `sort_index`, `nunique`, `mode`, any `np.asarray`/`np.unique`/`np.argsort` on data arrays.
+2. **Benchmarks** — Run `test_benchmarks.py`, validate jaxframe+JIT beats pandas for numeric ops. Profile and fix bottlenecks.
+3. **Real-world dogfood** — Use jaxframe for an actual ML workflow (load → clean → feature engineer → train with grad) to find gaps.
+4. **Merge to main + packaging** — Squash/rebase feature branch to main, add README, publish to PyPI.
+5. **Memory/perf of expanding/rolling** — `expanding()` creates O(n²) gather matrix. Replace with cumulative ops for scalability.
+6. **vmap support** — Test and support `jax.vmap` for batched operations.
 
 ## Tools
 

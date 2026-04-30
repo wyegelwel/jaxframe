@@ -894,8 +894,6 @@ class DataFrame:
             raise ValueError("No numeric columns to compute mean")
 
         if axis is None:
-            # Use _fast_nansum (grad-safe) rather than _fast_nanmean
-            # (multi-operand lax.reduce doesn't support backward pass)
             total_sum = jnp.float32(0.0)
             total_count = jnp.float32(0.0)
             for block in self._dtype_blocks.values():
@@ -947,8 +945,6 @@ class DataFrame:
             raise ValueError("No numeric columns to compute variance")
 
         if axis is None:
-            # Use _fast_nansum (grad-safe) rather than _fast_nanvar
-            # (multi-operand lax.reduce doesn't support backward pass)
             total_sum = jnp.float32(0.0)
             total_sumsq = jnp.float32(0.0)
             total_count = jnp.float32(0.0)
@@ -1263,7 +1259,7 @@ class DataFrame:
 
     def fillna(self, value):
         """Replace NaN with value (JIT-compatible)."""
-        return self._apply_blockwise(lambda block: jnp.where(jnp.isnan(block), value, block))
+        return self._apply_blockwise(lambda block: _fillna_block(block, value))
 
     def corr(self):
         """
@@ -2074,17 +2070,13 @@ class DataFrame:
         n_rows = len(self._index)
 
         def _shift_block(block):
+            if abs(periods) >= n_rows:
+                return jnp.full_like(block, fill_value)
+            rolled = jnp.roll(block, periods, axis=0)
             if periods > 0:
-                if periods >= n_rows:
-                    return jnp.full_like(block, fill_value)
-                pad = jnp.full((periods, block.shape[1]), fill_value, dtype=block.dtype)
-                return jnp.concatenate([pad, block[:-periods]], axis=0)
+                return rolled.at[:periods].set(fill_value)
             else:
-                ap = abs(periods)
-                if ap >= n_rows:
-                    return jnp.full_like(block, fill_value)
-                pad = jnp.full((ap, block.shape[1]), fill_value, dtype=block.dtype)
-                return jnp.concatenate([block[ap:], pad], axis=0)
+                return rolled.at[periods:].set(fill_value)
 
         return self._apply_blockwise(_shift_block)
 
@@ -3244,6 +3236,12 @@ def _rolling_window(x, window):
     return idx, valid
 
 
+@jax.jit
+def _fillna_block(block, value):
+    """JIT'd fillna — replaces NaN with value."""
+    return jnp.where(jnp.isnan(block), value, block)
+
+
 def _make_rolling_fn(reduce_fn):
     """Create a JIT'd rolling block function for a given reduction."""
     @jax.jit
@@ -3258,11 +3256,51 @@ def _make_rolling_fn(reduce_fn):
 
 
 _rolling_sum_block = _make_rolling_fn(lambda g: jnp.nansum(g, axis=1))
-_rolling_mean_block = _make_rolling_fn(lambda g: jnp.nanmean(g, axis=1))
-_rolling_var_block = _make_rolling_fn(lambda g: jnp.nanvar(g, axis=1, ddof=1))
-_rolling_std_block = _make_rolling_fn(lambda g: jnp.nanstd(g, axis=1, ddof=1))
 _rolling_min_block = _make_rolling_fn(lambda g: jnp.nanmin(g, axis=1))
 _rolling_max_block = _make_rolling_fn(lambda g: jnp.nanmax(g, axis=1))
+
+
+@jax.jit
+def _rolling_mean_block(block, idx, valid, min_periods):
+    """Rolling mean via sum/count (avoids slow jnp.nanmean)."""
+    gathered = block[idx]
+    mask = valid[:, :, None]
+    clean = jnp.where(mask, gathered, 0.0)
+    count = jnp.sum(mask, axis=1)
+    total = jnp.sum(clean, axis=1)
+    n_valid = jnp.sum(valid, axis=1)
+    result = total / jnp.maximum(count, 1)
+    return jnp.where(n_valid[:, None] >= min_periods, result, jnp.nan)
+
+
+@jax.jit
+def _rolling_var_block(block, idx, valid, min_periods):
+    """Rolling variance via sum/sumsq/count (avoids slow jnp.nanvar)."""
+    gathered = block[idx]
+    mask = valid[:, :, None]
+    clean = jnp.where(mask, gathered, 0.0)
+    count = jnp.sum(mask, axis=1)
+    total = jnp.sum(clean, axis=1)
+    total_sq = jnp.sum(clean * clean, axis=1)
+    mean = total / jnp.maximum(count, 1)
+    n_valid = jnp.sum(valid, axis=1)
+    var = (total_sq - count * mean * mean) / jnp.maximum(count - 1, 1)
+    return jnp.where(n_valid[:, None] >= min_periods, var, jnp.nan)
+
+
+@jax.jit
+def _rolling_std_block(block, idx, valid, min_periods):
+    """Rolling std via sum/sumsq/count (avoids slow jnp.nanstd)."""
+    gathered = block[idx]
+    mask = valid[:, :, None]
+    clean = jnp.where(mask, gathered, 0.0)
+    count = jnp.sum(mask, axis=1)
+    total = jnp.sum(clean, axis=1)
+    total_sq = jnp.sum(clean * clean, axis=1)
+    mean = total / jnp.maximum(count, 1)
+    n_valid = jnp.sum(valid, axis=1)
+    var = (total_sq - count * mean * mean) / jnp.maximum(count - 1, 1)
+    return jnp.where(n_valid[:, None] >= min_periods, jnp.sqrt(jnp.maximum(var, 0)), jnp.nan)
 
 
 class Rolling:

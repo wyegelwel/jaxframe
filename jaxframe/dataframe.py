@@ -809,6 +809,42 @@ class DataFrame:
 
     @staticmethod
     @jax.jit
+    def _fast_nansum_and_count(block):
+        """Total NaN-skipping sum + valid count for a block, both scalar.
+
+        Fuses nansum + count into a single JIT call to avoid Python dispatch overhead.
+        Uses lax.reduce axis=0 (well-optimized) then .sum() on the small column vector.
+        """
+        block = block.astype(jnp.float32)
+        def nan_add(a, b):
+            return (
+                jnp.where(jnp.isnan(a), 0.0, a)
+                + jnp.where(jnp.isnan(b), 0.0, b)
+            )
+        col_sums = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
+        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+        col_counts = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
+        return col_sums.sum(), col_counts.sum()
+
+    @staticmethod
+    @jax.jit
+    def _fast_nansumsq_and_count(block):
+        """Total NaN-skipping sum, sum-of-squares, and count for a block, all scalar."""
+        block = block.astype(jnp.float32)
+        def nan_add(a, b):
+            return (
+                jnp.where(jnp.isnan(a), 0.0, a)
+                + jnp.where(jnp.isnan(b), 0.0, b)
+            )
+        col_sums = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
+        clean = jnp.where(jnp.isnan(block), 0.0, block)
+        col_sumsq = jax.lax.reduce(clean * clean, jnp.float32(0.0), jax.lax.add, [0])
+        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+        col_counts = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
+        return col_sums.sum(), col_sumsq.sum(), col_counts.sum()
+
+    @staticmethod
+    @jax.jit
     def _fast_nanmean(block):
         """NaN-skipping mean via single-pass multi-operand lax.reduce."""
         clean = jnp.where(jnp.isnan(block), 0.0, block)
@@ -897,9 +933,9 @@ class DataFrame:
             total_sum = jnp.float32(0.0)
             total_count = jnp.float32(0.0)
             for block in self._dtype_blocks.values():
-                total_sum = total_sum + self._fast_nansum(block).sum()
-                valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
-                total_count = total_count + valid.sum()
+                s, c = self._fast_nansum_and_count(block)
+                total_sum = total_sum + s
+                total_count = total_count + c
             return total_sum / jnp.maximum(total_count, 1)
 
         if axis == 0:
@@ -949,10 +985,10 @@ class DataFrame:
             total_sumsq = jnp.float32(0.0)
             total_count = jnp.float32(0.0)
             for block in self._dtype_blocks.values():
-                total_sum = total_sum + self._fast_nansum(block).sum()
-                total_sumsq = total_sumsq + self._fast_nansum(block * block).sum()
-                valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
-                total_count = total_count + valid.sum()
+                s, sq, c = self._fast_nansumsq_and_count(block)
+                total_sum = total_sum + s
+                total_sumsq = total_sumsq + sq
+                total_count = total_count + c
             mean = total_sum / jnp.maximum(total_count, 1)
             return (total_sumsq - total_count * mean * mean) / jnp.maximum(total_count - ddof, 1)
 

@@ -910,8 +910,11 @@ class DataFrame:
             raise ValueError("No numeric columns to sum")
 
         if axis is None:
+            blocks = list(self._dtype_blocks.values())
+            if len(blocks) == 1:
+                return self._fast_nansum(blocks[0]).sum()
             total = jnp.float32(0.0)
-            for block in self._dtype_blocks.values():
+            for block in blocks:
                 total = total + self._fast_nansum(block).sum()
             return total
 
@@ -930,13 +933,16 @@ class DataFrame:
             raise ValueError("No numeric columns to compute mean")
 
         if axis is None:
-            total_sum = jnp.float32(0.0)
-            total_count = jnp.float32(0.0)
-            for block in self._dtype_blocks.values():
-                s, c = self._fast_nansum_and_count(block)
-                total_sum = total_sum + s
-                total_count = total_count + c
-            return total_sum / jnp.maximum(total_count, 1)
+            blocks = list(self._dtype_blocks.values())
+            if len(blocks) == 1:
+                s, c = self._fast_nansum_and_count(blocks[0])
+                return s / jnp.maximum(c, 1)
+            # Multi-dtype: concat all blocks (promoted to float32) and reduce once
+            combined = jnp.concatenate(
+                [b.astype(jnp.float32).reshape(-1) for b in blocks]
+            )
+            s, c = self._fast_nansum_and_count(combined.reshape(1, -1))
+            return s / jnp.maximum(c, 1)
 
         if axis == 0:
             return self._reduce_axis0(self._fast_nanmean, "mean")
@@ -981,16 +987,20 @@ class DataFrame:
             raise ValueError("No numeric columns to compute variance")
 
         if axis is None:
-            total_sum = jnp.float32(0.0)
-            total_sumsq = jnp.float32(0.0)
-            total_count = jnp.float32(0.0)
-            for block in self._dtype_blocks.values():
-                s, sq, c = self._fast_nansumsq_and_count(block)
-                total_sum = total_sum + s
-                total_sumsq = total_sumsq + sq
-                total_count = total_count + c
-            mean = total_sum / jnp.maximum(total_count, 1)
-            return (total_sumsq - total_count * mean * mean) / jnp.maximum(total_count - ddof, 1)
+            blocks = list(self._dtype_blocks.values())
+            if len(blocks) == 1:
+                s, sq, c = self._fast_nansumsq_and_count(blocks[0])
+            else:
+                s = jnp.float32(0.0)
+                sq = jnp.float32(0.0)
+                c = jnp.float32(0.0)
+                for block in blocks:
+                    bs, bsq, bc = self._fast_nansumsq_and_count(block)
+                    s = s + bs
+                    sq = sq + bsq
+                    c = c + bc
+            mean = s / jnp.maximum(c, 1)
+            return (sq - c * mean * mean) / jnp.maximum(c - ddof, 1)
 
         if axis == 0:
             ddof_arr = jnp.float32(ddof)
@@ -1295,7 +1305,14 @@ class DataFrame:
 
     def fillna(self, value):
         """Replace NaN with value (JIT-compatible)."""
-        return self._apply_blockwise(lambda block: _fillna_block(block, value))
+        new_blocks = {dt: _fillna_block(block, value) for dt, block in self._dtype_blocks.items()}
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=dict(self._column_to_block),
+            object_data=self._object_data,
+            index=self._index,
+            column_order=list(self._column_order),
+        )
 
     def corr(self):
         """
@@ -1394,18 +1411,22 @@ class DataFrame:
     # ========================================
 
     def sort_values(self, by, ascending=True):
-        """Sort by column values using argsort. JIT-compatible."""
+        """Sort by column values. Eager argsort (structure discovery) + JAX gather."""
         if isinstance(by, str):
             by = [by]
         # Get the primary sort column
         col = by[0]
         dtype, idx = self._column_to_block[col]
         sort_col = self._dtype_blocks[dtype][:, idx]
-        order = jnp.argsort(sort_col)
+        # Structure discovery: eager np.argsort (much faster than jnp on CPU)
+        order = np.argsort(np.asarray(sort_col), kind="quicksort")
         if not ascending:
             order = order[::-1]
-        # Apply sort order to all blocks
-        new_blocks = {dt: block[order] for dt, block in self._dtype_blocks.items()}
+        # Data computation: JAX gather
+        new_blocks = {
+            dt: jnp.take(block, order, axis=0)
+            for dt, block in self._dtype_blocks.items()
+        }
         # Index is static aux data in pytree — keep original under JIT
         return DataFrame._from_parts(
             dtype_blocks=new_blocks,
@@ -1431,7 +1452,7 @@ class DataFrame:
         )
 
     def rank(self, ascending=True, method="ordinal"):
-        """Rank values along axis 0. JIT-compatible (argsort-based, not differentiable).
+        """Rank values along axis 0. Eager argsort (structure discovery), not differentiable.
 
         Args:
             ascending: True for smallest=1 ranking
@@ -1441,46 +1462,82 @@ class DataFrame:
 
         def _rank_block(block):
             n = block.shape[0]
+            block_np = np.asarray(block)
             if method == "ordinal":
                 if ascending:
-                    order = jnp.argsort(block, axis=0)
-                    ranks = jnp.argsort(order, axis=0) + 1
+                    order = np.argsort(block_np, axis=0, kind="quicksort")
                 else:
-                    order = jnp.argsort(-block, axis=0)
-                    ranks = jnp.argsort(order, axis=0) + 1
-                return ranks.astype(jnp.float32)
+                    order = np.argsort(-block_np, axis=0, kind="quicksort")
+                # Invert permutation: ranks[order[i]] = i+1
+                ranks = np.empty_like(order, dtype=np.float32)
+                arange = np.arange(1, n + 1, dtype=np.float32)
+                np.put_along_axis(
+                    ranks, order, arange[:, None], axis=0
+                )
+                return jnp.asarray(ranks)
             elif method == "average":
-                order = jnp.argsort(block, axis=0)
-                sorted_block = jnp.take_along_axis(block, order, axis=0)
-                ranks = jnp.argsort(order, axis=0).astype(jnp.float32) + 1
-                # For ties, average the ranks
-                for c in range(block.shape[1]):
-                    vals = sorted_block[:, c]
-                    # Group equal values and assign average rank
-                    same_as_next = jnp.concatenate([vals[:-1] == vals[1:], jnp.array([False])])
-                    # Use cumulative sum of group boundaries
-                    group_id = jnp.cumsum(~same_as_next)
-                    group_id = jnp.concatenate([jnp.array([0]), group_id[:-1]])
-                    # Compute average rank per group using segment operations
-                    ordinal_ranks = jnp.arange(1, n + 1, dtype=jnp.float32)
-                    rank_sums = jnp.zeros(n, dtype=jnp.float32).at[group_id].add(ordinal_ranks)
-                    rank_counts = jnp.zeros(n, dtype=jnp.float32).at[group_id].add(1.0)
-                    avg_ranks = rank_sums / rank_counts
-                    # Map back to original positions
-                    sorted_avg = avg_ranks[group_id]
-                    result_col = jnp.empty(n, dtype=jnp.float32)
-                    result_col = result_col.at[order[:, c]].set(sorted_avg)
-                    ranks = ranks.at[:, c].set(result_col)
+                order = np.argsort(
+                    block_np, axis=0, kind="mergesort"
+                )
+                sorted_block = np.take_along_axis(
+                    block_np, order, axis=0
+                )
+                # Detect tie boundaries across all columns
+                same_as_next = np.zeros(
+                    (n, block_np.shape[1]), dtype=bool
+                )
+                same_as_next[:-1] = (
+                    sorted_block[:-1] == sorted_block[1:]
+                )
+                # Group IDs per column (cumsum of boundaries)
+                group_id = np.cumsum(~same_as_next, axis=0)
+                zeros = np.zeros(
+                    (1, block_np.shape[1]), dtype=group_id.dtype
+                )
+                group_id = np.concatenate(
+                    [zeros, group_id[:-1]], axis=0
+                )
+                # Average rank per group via numpy bincount
+                ordinal_ranks = np.arange(
+                    1, n + 1, dtype=np.float64
+                )
+                num_groups = group_id.max() + 1
+                ranks = np.empty(
+                    (n, block_np.shape[1]), dtype=np.float32
+                )
+                for c in range(block_np.shape[1]):
+                    gid = group_id[:, c]
+                    sums = np.bincount(
+                        gid, weights=ordinal_ranks,
+                        minlength=num_groups,
+                    )
+                    counts = np.bincount(
+                        gid, minlength=num_groups
+                    )
+                    avg = sums / np.maximum(counts, 1)
+                    sorted_avg = avg[gid].astype(np.float32)
+                    col_ranks = np.empty(n, dtype=np.float32)
+                    col_ranks[order[:, c]] = sorted_avg
+                    ranks[:, c] = col_ranks
                 if not ascending:
                     ranks = n + 1 - ranks
-                return ranks
+                return jnp.asarray(ranks)
             else:
                 # Fallback: ordinal
-                order = jnp.argsort(block, axis=0)
-                ranks = jnp.argsort(order, axis=0) + 1
-                if not ascending:
-                    ranks = block.shape[0] + 1 - ranks
-                return ranks.astype(jnp.float32)
+                if ascending:
+                    order = np.argsort(
+                        block_np, axis=0, kind="quicksort"
+                    )
+                else:
+                    order = np.argsort(
+                        -block_np, axis=0, kind="quicksort"
+                    )
+                ranks = np.empty_like(order, dtype=np.float32)
+                arange = np.arange(1, n + 1, dtype=np.float32)
+                np.put_along_axis(
+                    ranks, order, arange[:, None], axis=0
+                )
+                return jnp.asarray(ranks)
 
         return self._apply_blockwise(_rank_block)
 

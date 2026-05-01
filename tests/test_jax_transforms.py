@@ -56,14 +56,14 @@ OPERATIONS = [
     # Copy (Session 3) — copy then reduce
     ("copy_sum", lambda df: df.copy().sum(axis=None), True, True),
     # Sorting (Session 4) — argsort not differentiable
-    ("sort_sum", lambda df: df.sort_values("a").sum(axis=None), True, False),
+    ("sort_sum", lambda df: df.sort_values("a").sum(axis=None), False, False),
     # Describe & quantile (Session 5)
     ("quantile_sum", lambda df: df.quantile(0.5).sum(), True, False),
-    ("nlargest_sum", lambda df: df.nlargest(2, "a").sum(axis=None), True, False),
-    ("nsmallest_sum", lambda df: df.nsmallest(2, "a").sum(axis=None), True, False),
+    ("nlargest_sum", lambda df: df.nlargest(2, "a").sum(axis=None), False, False),
+    ("nsmallest_sum", lambda df: df.nsmallest(2, "a").sum(axis=None), False, False),
     # pipe, between, rank
     ("pipe_sum", lambda df: df.pipe(lambda d: d * 2).sum(axis=None), True, True),
-    ("rank_sum", lambda df: df.rank().sum(axis=None), True, False),
+    ("rank_sum", lambda df: df.rank().sum(axis=None), False, False),
     # Column manipulation (Session 6)
     ("drop_sum", lambda df: df.drop(columns=["a"]).sum(axis=None), True, True),
     ("rename_sum", lambda df: df.rename(columns={"a": "x"}).sum(axis=None), True, True),

@@ -79,7 +79,8 @@ All ops are JIT-compatible. The following are **not** differentiable (`jax.grad`
 | `median`, `quantile` | Non-smooth (sort-based, gradient undefined at boundaries) |
 | `isna`, `notna`, `isnull`, `notnull` | Boolean output — not a real-valued function |
 | `count` | Integer output (sum of booleans) — not real-valued |
-| `sort_values`, `nlargest`, `nsmallest` | Permutation-based (argsort) — discrete, not differentiable |
+| `sort_values`, `nlargest`, `nsmallest` | Eager np.argsort (structure discovery) — not JIT or grad compatible |
+| `rank` | Eager np.argsort (structure discovery) — not JIT or grad compatible |
 | `groupby.min`, `groupby.max` | Same as min/max — non-smooth |
 | `groupby.count` | Same as count — integer output |
 | `groupby.prod` | JAX limitation: `scatter_mul` gradients require `unique_indices=True` |

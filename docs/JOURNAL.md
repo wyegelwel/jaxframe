@@ -157,6 +157,41 @@ Also tried using the fused function for scalar sum (which only needs sum, not co
 
 ---
 
+## 2026-04-30: Eager np.argsort for Sort/Rank
+
+### Problem
+sort_values (0.25x) and rank (0.25x) were 4x slower than pandas because `jnp.argsort` on CPU goes through XLA's sort backend, which is much slower than NumPy's optimized introsort.
+
+### Key Insight
+Sort key computation and rank ordering are **structure discovery** — they determine permutation indices, not data values. Per our architecture, structure discovery should be eager. The data gathering (applying the permutation) is the computation that stays as JAX ops.
+
+### Changes
+- **sort_values**: `jnp.argsort` → `np.argsort(np.asarray(sort_col))` for key, `jnp.take(block, order, axis=0)` for data gather
+- **rank ordinal**: Full `np.argsort` + `np.put_along_axis` for inversion (avoids double argsort)
+- **rank average**: Switched to numpy for the entire tie-averaging logic — `np.bincount` is much faster than `jnp.zeros.at[].add()`
+- **fillna**: Inlined `_from_parts` to skip `_apply_blockwise` re-keying overhead
+- **scalar reductions**: Single-block fast path to skip loop when only 1 dtype block
+
+### Trade-off
+sort_values, rank, nlargest, nsmallest are now **not JIT-compatible** (they call `np.asarray` which breaks tracing). This is acceptable because:
+1. They were already non-differentiable
+2. They follow the eager structure-discovery architecture
+3. The 10-16x speedup is massive
+
+### Results (1M rows, 10 cols)
+| Op | Before | After | Change |
+|----|--------|-------|--------|
+| sort_values | pd=82ms, jf=328ms (0.25x) | jf=33ms (**2.6x faster**) | 10x |
+| rank | pd=1623ms, jf=6400ms (0.25x) | jf=410ms (**4.0x faster**) | 16x |
+| shift | pd=13.4ms, jf=14.5ms (0.92x) | jf=13.0ms (**1.13x faster**) | now wins |
+| fillna | pd=5.4ms, jf=6.5ms (0.82x) | jf=6.2ms (0.87x) | marginal |
+| scalar mean | pd=4.3ms, jf=8.0ms (0.54x) | jf=9.2ms (0.46x) | no change |
+
+### Lesson
+**Don't fight the hardware.** NumPy's sort is 10x faster than JAX's on CPU. When an operation is inherently eager (structure discovery), use NumPy. Reserve JAX for data computation that benefits from JIT/GPU.
+
+---
+
 ## Summary: Performance Lessons
 
 1. **lax.reduce with custom combiner** is the key to fast NaN-aware reductions on CPU
@@ -168,6 +203,7 @@ Also tried using the fused function for scalar sum (which only needs sum, not co
 7. **Block-level operations beat per-column loops** — always operate on dtype blocks
 8. **jnp.roll + .at[].set() beats jnp.concatenate** for shift-like ops
 9. **Don't compute unused outputs** — even inside JIT, extra work costs time
+10. **Use NumPy for eager structure discovery** — `np.argsort` is 10x faster than `jnp.argsort` on CPU
 
 ## Current Benchmark Score (1M rows, 10 cols)
 
@@ -177,13 +213,13 @@ Also tried using the fused function for scalar sum (which only needs sum, not co
 | Column reductions | col_sum, col_mean, col_std | 3 | 0 |
 | Arithmetic chains | mul+sum, pow+sum, chain | 3 | 0 |
 | Cumulative | cumsum, cumprod | 2 | 0 |
-| Shift/diff | diff | 1 | 1 (shift ~parity) |
+| Shift/diff | diff, shift | 2 | 0 |
 | Rolling | rolling_sum, rolling_mean | 2 | 0 |
 | Expanding | expanding_sum, expanding_mean | 2 | 0 |
 | EWM | ewm_mean | 1 | 0 |
-| Data cleaning | clip, where | 2 | 1 (fillna) |
+| Data cleaning | clip, where | 2 | 1 (fillna ~parity) |
 | GroupBy | sum, mean, std | 3 | 0 |
-| Sorting | — | 0 | 2 (sort, rank) |
-| **Total** | | **25** | **5** |
+| Sorting | sort_values, rank | 2 | 0 |
+| **Total** | | **28** | **2** |
 
-Remaining pandas wins: sort/rank (fundamental JAX CPU sort limitation), scalar mean (dispatch overhead), fillna (~parity), shift (~parity).
+Remaining pandas wins: scalar mean (Python dispatch overhead — 0.46x), fillna (~parity at 0.87x). Scalar min/max lose at 100K rows only (small data overhead, win at other sizes).

@@ -8,31 +8,24 @@ A JAX-based DataFrame library that mirrors the pandas API with support for autom
 - No automatic differentiation
 - No JIT compilation
 - No GPU/TPU acceleration
-- NumPy backend limits performance
 
-**JAX** provides:
-- ✅ Automatic differentiation (grad, jacobian, hessian)
-- ✅ JIT compilation for speed
-- ✅ Vectorization (vmap, pmap)
-- ✅ GPU/TPU support
-
-**JAXFrame** combines the best of both:
-- Familiar pandas-like API
-- JAX performance and transformations
-- Differentiable data pipelines
-- JIT-compiled analytics
+**JAXFrame** combines a pandas-like API with JAX's transformations:
+- Familiar pandas-like API (reductions, arithmetic, rolling, groupby, etc.)
+- JIT compilation for faster repeated computations
+- Automatic differentiation (`jax.grad`) through DataFrame operations
+- Vectorization (`jax.vmap`) across batches of DataFrames
+- GPU/TPU support via JAX
 
 ## Quick Start
 
 ```python
 import jax
-import jax.numpy as jnp
 import jaxframe as jf
 
 # Create a DataFrame (like pandas)
 df = jf.DataFrame({
     'price': [10.0, 20.0, 30.0],
-    'quantity': [1, 2, 3],
+    'quantity': [1.0, 2.0, 3.0],
     'discount': [0.1, 0.2, 0.15]
 })
 
@@ -40,7 +33,7 @@ df = jf.DataFrame({
 revenue = df['price'] * df['quantity']
 total = revenue.sum()
 
-# JIT compilation (100x faster!)
+# JIT compilation — compile once, run fast on repeat calls
 @jax.jit
 def compute_revenue(df):
     return (df['price'] * df['quantity'] * (1 - df['discount'])).sum()
@@ -49,12 +42,10 @@ result = compute_revenue(df)
 
 # Automatic differentiation
 def loss_fn(df):
-    predicted = df['price'] * 1.5
-    actual = df['target']
-    return ((predicted - actual) ** 2).mean()
+    return (df['price'] ** 2).mean()
 
 grad_fn = jax.grad(loss_fn)
-gradients = grad_fn(df)
+gradients = grad_fn(df)  # Returns DataFrame with gradients
 ```
 
 ## Key Features
@@ -62,33 +53,25 @@ gradients = grad_fn(df)
 ### 1. Differentiable DataFrames
 
 ```python
-# Define a loss function over DataFrames
-def revenue_loss(df, weights):
-    predicted_revenue = (
-        df['price'] * weights['price_weight'] +
-        df['quantity'] * weights['qty_weight']
-    )
-    return ((predicted_revenue - df['actual_revenue']) ** 2).sum()
+# Gradient w.r.t. DataFrame values
+def mse_loss(df):
+    predicted = df['feature1'] * 2 + df['feature2'] * 3
+    return ((predicted - df['target']) ** 2).sum()
 
-# Compute gradients
-weights = {'price_weight': 1.0, 'qty_weight': 1.0}
-grads = jax.grad(revenue_loss, argnums=1)(df, weights)
+grad_fn = jax.grad(mse_loss)
+gradients = grad_fn(df)  # ∂L/∂(each element)
 ```
 
 ### 2. JIT-Compiled Operations
 
 ```python
-# Compile once, run fast
 @jax.jit
 def process_batch(df):
-    normalized = (df - df.mean()) / df.std()
-    return normalized.sum(axis=0)
+    normalized = (df - df.mean(axis=0)) / df.std(axis=0)
+    return normalized.sum(axis=None)
 
-# First call: compiles
-result1 = process_batch(df1)  # ~100ms
-
-# Subsequent calls: instant
-result2 = process_batch(df2)  # ~1ms (100x faster!)
+# First call compiles; subsequent calls with same-shaped data reuse the compiled code
+result = process_batch(df)
 ```
 
 ### 3. Mixed Numeric/Object Columns
@@ -111,36 +94,51 @@ products = df['product']  # Returns numpy array
 ### 4. Vectorization
 
 ```python
-# Process multiple DataFrames in parallel
+import jax.numpy as jnp
+
+# Stack DataFrames into a batched pytree
+batch = jax.tree.map(lambda *xs: jnp.stack(xs), df1, df2, df3)
+
+# vmap processes the batch in parallel
 @jax.vmap
 def process(df):
-    return df['price'].mean()
+    return df.sum(axis=None)
 
-results = process(list_of_dfs)  # Parallel execution
+results = process(batch)
 ```
-
-## Design Principles
-
-1. **Numeric-First**: Numeric operations get full JAX performance
-2. **Gradual Degradation**: Non-JIT-able ops fall back gracefully
-3. **Explicit Over Implicit**: Clear about what's JIT/grad compatible
-4. **Pandas-Compatible**: Familiar API where possible
 
 ## Limitations
 
-Not all pandas operations are supported in JIT context:
+JAXFrame uses a **hybrid eager/JIT** architecture: structure discovery (shapes, group assignments) happens eagerly, while data computation uses JIT-compiled JAX ops. This means:
 
-❌ **Not JIT-compatible**:
+**Not supported inside `jax.jit`:**
 ```python
-df[df['price'] > 100]  # Dynamic filtering (changes shape)
-df.groupby('dynamic_key')  # Unknown number of groups
+df[df['price'] > 100]      # Dynamic filtering (changes shape)
+df.sort_values('col')       # Argsort needs concrete values
 ```
 
-✅ **JIT-compatible alternatives**:
+**JIT-compatible alternatives:**
 ```python
-df.where(df['price'] > 100, fill_value=0)  # Fixed shape
-df.groupby('static_key')  # Encoded categories
+df.where(df['price'] > 100, 0)  # Fixed shape, NaN/fill replacement
 ```
+
+**GroupBy — hybrid eager/JIT:**
+```python
+# Group discovery (groupby call) must happen outside jit:
+gb = df.groupby('key')['value']
+
+# But aggregation is JIT-compiled:
+@jax.jit
+def fast_agg(gb):
+    return gb.mean()
+
+result = fast_agg(gb)  # JIT-compiled segment ops
+```
+
+**Not currently supported:**
+- User-defined functions (UDFs) — `apply` works with JAX-compatible functions only (e.g., `jnp.sum`), not arbitrary Python functions
+- String operations on object columns
+- MultiIndex
 
 ## Installation
 

@@ -14,7 +14,7 @@ A JAX-based DataFrame library that mirrors the pandas API with support for autom
 - JIT compilation for faster repeated computations
 - Automatic differentiation (`jax.grad`) through DataFrame operations
 - Vectorization (`jax.vmap`) across batches of DataFrames
-- GPU/TPU support via JAX
+- GPU support via JAX
 
 ## Quick Start
 
@@ -91,7 +91,7 @@ fast_result = jax.jit(lambda x: x * 2)(df_numeric)
 products = df['product']  # Returns numpy array
 ```
 
-### 4. Vectorization
+### 4. Vectorization (`vmap`)
 
 ```python
 import jax.numpy as jnp
@@ -106,6 +106,17 @@ def process(df):
 
 results = process(batch)
 ```
+
+### 5. JAX Transform Compatibility
+
+DataFrames are registered as JAX pytrees, so they work with the full JAX transform stack:
+
+| Transform | Status | Notes |
+|-----------|--------|-------|
+| `jax.jit` | Supported | All pure-JAX ops; eager structure discovery ops (groupby, sort) must happen outside jit |
+| `jax.grad` | Supported | Float operations only; non-smooth ops (min/max) and boolean outputs excluded |
+| `jax.vmap` | Supported | Batch a function over stacked DataFrames |
+| `jax.pmap` | Supported | Multi-device parallelism (same mechanism as vmap; tested but not battle-tested in production) |
 
 ## Limitations
 

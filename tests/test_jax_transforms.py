@@ -263,3 +263,41 @@ class TestVmapCompat:
         except (TypeError, FloatingPointError):
             # Some ops are not differentiable (min, max, prod with zeros, etc.)
             pytest.skip(f"{name} not differentiable")
+
+
+# ---- pmap compatibility ----
+# pmap uses the same pytree mechanism as vmap but distributes across physical devices.
+# We simulate 2 CPU devices via XLA_FLAGS for testing.
+
+
+def _pmap_available():
+    """Check if we have >= 2 devices for pmap testing."""
+    return jax.local_device_count() >= 2
+
+
+@pytest.mark.parametrize("name,op", VMAP_OPERATIONS, ids=[o[0] for o in VMAP_OPERATIONS])
+class TestPmapCompat:
+    def test_pmap(self, name, op):
+        """pmap produces same results as mapping eagerly."""
+        if not _pmap_available():
+            pytest.skip("pmap requires >= 2 devices")
+        n_devices = jax.local_device_count()
+        batch = _make_batch(*([DATA, DATA2][:n_devices]))
+        pmapped = jax.pmap(op)(batch)
+        eager0 = op(DataFrame(DATA))
+        eager1 = op(DataFrame(DATA2))
+        expected = jnp.array([float(eager0), float(eager1)][:n_devices])
+        assert_allclose(pmapped, expected, rtol=1e-5)
+
+    def test_pmap_grad(self, name, op):
+        """pmap + grad composition works."""
+        if not _pmap_available():
+            pytest.skip("pmap requires >= 2 devices")
+        n_devices = jax.local_device_count()
+        batch = _make_batch(*([DATA, DATA2][:n_devices]))
+        try:
+            grads = jax.pmap(jax.grad(op))(batch)
+            for block in grads._dtype_blocks.values():
+                assert jnp.all(jnp.isfinite(block)), f"{name} pmap+grad non-finite"
+        except (TypeError, FloatingPointError):
+            pytest.skip(f"{name} not differentiable")

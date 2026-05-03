@@ -136,7 +136,7 @@ result = fast_agg(gb)  # JIT-compiled segment ops
 ```
 
 **Not currently supported:**
-- Arbitrary user-defined functions (UDFs) — `apply` only accepts functions composed of JAX operations (`jnp.sum`, `jnp.exp`, arithmetic, etc.), not arbitrary Python code
+- UDFs via `apply` work eagerly with arbitrary Python functions, but are only JIT-compatible if the function uses JAX operations exclusively
 - String operations on object columns
 - MultiIndex
 

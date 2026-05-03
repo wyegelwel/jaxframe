@@ -145,7 +145,8 @@ df.groupby('static_key')  # Encoded categories
 ## Installation
 
 ```bash
-pip install jaxframe
+pip install jaxframe          # CPU only
+pip install jaxframe[cuda12]  # with CUDA 12 GPU support
 ```
 
 ## Documentation
@@ -154,13 +155,12 @@ See [DESIGN.md](DESIGN.md) for detailed architecture and design decisions.
 
 ## Examples
 
-- [Differentiable Feature Engineering](examples/feature_engineering.py)
-- [JIT-Compiled Analytics](examples/analytics.py)
-- [Time Series Processing](examples/timeseries.py)
+See the [examples/](examples/) directory for more:
 
-## Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+- [Gradient computation](examples/grad_example.py)
+- [JIT compilation](examples/jit_example.py)
+- [Mixed column types](examples/mixed_columns_example.py)
+- [Pandas compatibility](examples/pandas_compatibility_demo.py)
 
 ## License
 

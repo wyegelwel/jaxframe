@@ -54,3 +54,6 @@ dmypy.json
 
 # Benchmark results
 benchmarks/results/
+
+# Scratch files
+tmp/

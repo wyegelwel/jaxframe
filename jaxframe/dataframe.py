@@ -773,6 +773,7 @@ class DataFrame:
     @jax.jit
     def _fast_nanmin(block):
         """NaN-skipping min via single-pass fused lax.reduce."""
+        block = block.astype(jnp.float32)
 
         def combiner(a, b):
             return jnp.minimum(
@@ -786,6 +787,7 @@ class DataFrame:
     @jax.jit
     def _fast_nanmax(block):
         """NaN-skipping max via single-pass fused lax.reduce."""
+        block = block.astype(jnp.float32)
 
         def combiner(a, b):
             return jnp.maximum(
@@ -3412,26 +3414,69 @@ class Rolling:
         )
 
     def _apply_cumsum(self, block_fn):
-        """Apply a prefix-sum rolling function — O(n) memory."""
-        new_blocks = {}
+        """Apply a prefix-sum rolling function — O(n) memory.
+
+        All results are float32 (rolling stats are always float).
+        Merges multiple dtype blocks into a single float32 block.
+        """
+        parts = []  # (result_block, [(col, original_col_idx), ...])
         window = jnp.int32(self._window)
         min_periods = jnp.int32(self._min_periods)
         for dtype, block in self._df._dtype_blocks.items():
-            result = block_fn(block, window, min_periods)
-            new_blocks[result.dtype] = result
-        return self._build_result(new_blocks)
+            result = block_fn(block.astype(jnp.float32), window, min_periods)
+            parts.append((result, dtype))
+
+        # Merge all result blocks into one float32 block
+        merged = jnp.concatenate([p[0] for p in parts], axis=1)
+        new_blocks = {jnp.float32: merged}
+
+        # Rebuild column_to_block with correct indices into merged block
+        new_col_to_block = {}
+        offset = 0
+        for result, orig_dtype in parts:
+            for col, (dt, col_idx) in self._df._column_to_block.items():
+                if dt == orig_dtype:
+                    new_col_to_block[col] = (jnp.float32, offset + col_idx)
+            offset += result.shape[1]
+
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
 
     def _apply_gather(self, block_fn):
         """Apply a gather-based rolling function — O(n*w) memory. Used for min/max."""
-        new_blocks = {}
+        parts = []
         min_periods = jnp.int32(self._min_periods)
         for dtype, block in self._df._dtype_blocks.items():
-            idx, valid = _rolling_window(block, self._window)
+            fblock = block.astype(jnp.float32)
+            idx, valid = _rolling_window(fblock, self._window)
             idx = jnp.array(idx)
             valid = jnp.array(valid)
-            result = block_fn(block, idx, valid, min_periods)
-            new_blocks[result.dtype] = result
-        return self._build_result(new_blocks)
+            result = block_fn(fblock, idx, valid, min_periods)
+            parts.append((result, dtype))
+
+        merged = jnp.concatenate([p[0] for p in parts], axis=1)
+        new_blocks = {jnp.float32: merged}
+
+        new_col_to_block = {}
+        offset = 0
+        for result, orig_dtype in parts:
+            for col, (dt, col_idx) in self._df._column_to_block.items():
+                if dt == orig_dtype:
+                    new_col_to_block[col] = (jnp.float32, offset + col_idx)
+            offset += result.shape[1]
+
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=new_col_to_block,
+            object_data=self._df._object_data,
+            index=self._df._index,
+            column_order=self._df._column_order,
+        )
 
     def sum(self):
         """Rolling sum."""

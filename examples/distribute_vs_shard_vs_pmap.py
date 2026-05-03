@@ -10,10 +10,12 @@ Key differences and when to use each.
 """
 
 import sys
+
 sys.path.insert(0, '..')
 
 import jax
 import jax.numpy as jnp
+
 from jaxframe import DataFrame
 
 
@@ -245,7 +247,7 @@ Example: Distributed Training
     ])
 
     print(f"\nPer-device data shape: {per_device_data.shape}")
-    print(f"  (devices, samples_per_device, features)")
+    print("  (devices, samples_per_device, features)")
 
     # Define training step with pmap
     @jax.pmap

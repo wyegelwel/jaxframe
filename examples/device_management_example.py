@@ -9,10 +9,12 @@ Demonstrates how to:
 """
 
 import sys
+
 sys.path.insert(0, '..')
 
 import jax
 import jax.numpy as jnp
+
 from jaxframe import DataFrame
 
 
@@ -178,7 +180,7 @@ def example_mixed_device_operations():
 
     # Same device - works fine
     result = df1 + df2
-    print(f"\ndf1 + df2 works (same device)")
+    print("\ndf1 + df2 works (same device)")
     print(f"Result device: {result.device}")
 
     # Different devices - JAX will handle automatically

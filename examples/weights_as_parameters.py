@@ -5,9 +5,11 @@ This demonstrates how to use JAXFrame DataFrames with trainable weights,
 showing that weights can (and should!) be passed as parameters.
 """
 
+import sys
+
 import jax
 import jax.numpy as jnp
-import sys
+
 sys.path.insert(0, '..')
 
 from jaxframe import DataFrame
@@ -141,7 +143,7 @@ def example_pytree_composition():
     grad_fn = jax.grad(loss, argnums=2)  # argnums=2 → third argument (weights)
     weight_grads = grad_fn(df_features, df_targets, weights)
 
-    print(f"\nGradients w.r.t. weights:")
+    print("\nGradients w.r.t. weights:")
     print(f"  ∂L/∂w: {weight_grads['w']}")
     print(f"  ∂L/∂b: {weight_grads['b']:.4f}")
 
@@ -149,7 +151,7 @@ def example_pytree_composition():
     grad_fn_features = jax.grad(loss, argnums=0)
     feature_grads = grad_fn_features(df_features, df_targets, weights)
 
-    print(f"\nGradients w.r.t. features (for adversarial examples):")
+    print("\nGradients w.r.t. features (for adversarial examples):")
     print(feature_grads)
 
     print("\n✅ Multiple DataFrames compose perfectly via pytrees!")

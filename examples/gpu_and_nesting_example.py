@@ -9,11 +9,14 @@ Demonstrates:
 """
 
 import sys
+
 sys.path.insert(0, '..')
+
+import time
 
 import jax
 import jax.numpy as jnp
-import time
+
 from jaxframe import DataFrame
 
 
@@ -317,7 +320,7 @@ def example_grad_through_nesting():
     grads = grad_fn(df, params, target)
 
     print("\nGradients computed successfully!")
-    print(f"Gradient shapes:")
+    print("Gradient shapes:")
     print(f"  ∂L/∂w1: {grads['w1'].shape}")
     print(f"  ∂L/∂w2: {grads['w2'].shape}")
 

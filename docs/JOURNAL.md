@@ -192,6 +192,46 @@ sort_values, rank, nlargest, nsmallest are now **not JIT-compatible** (they call
 
 ---
 
+## 2026-05-02: Rolling Window O(n) Prefix-Sum Rewrite
+
+### Problem
+Rolling sum/mean/var/std used O(n*w) gather matrices — `_rolling_window` created an (n, window) index array, then `block[idx]` materialized an (n, window, cols) tensor. For large windows or large data, this was memory-intensive.
+
+### Fix
+Replaced gather-based rolling with prefix-sum (cumulative sum) approach for sum, mean, var, std:
+```python
+cum = jnp.concatenate([zeros, jnp.cumsum(clean, axis=0)], axis=0)
+rolling_sum = cum[end] - cum[start]  # O(n) memory
+```
+
+- **sum/mean**: Single prefix sum + sliding window subtraction
+- **var/std**: Two prefix sums (values + squares) + sliding formula
+- **min/max**: Kept gather approach (no prefix-sum trick for order statistics)
+- Shared `_rolling_prefix_sums` helper eliminates code duplication
+
+### Architecture Fit
+This aligns with the cumsum-as-computation pattern — all ops are pure JAX, fully JIT-compilable and differentiable. No eager structure discovery needed (unlike sort/rank).
+
+### Results (CPU, 1M rows, 10 cols, window=10)
+| Op | pandas | jaxframe | Speedup |
+|----|--------|----------|---------|
+| rolling_sum | 121ms | 42ms | **2.9x** |
+| rolling_mean | 111ms | 45ms | **2.5x** |
+| rolling_var | 168ms | 77ms | **2.2x** |
+| rolling_std | 205ms | 85ms | **2.4x** |
+
+### Scan Alternative — Rejected
+Also tried `lax.scan` with a circular buffer for O(window) memory. Results:
+- **GPU**: 5000ms for 100K rows vs 2.4ms with prefix sums — 2000x slower due to sequential kernel launches
+- **CPU**: 751ms for 1M rows vs 42ms with prefix sums — 18x slower due to XLA while loop overhead
+
+The per-step overhead of `lax.scan` (scatter/gather on circular buffer, XLA loop iteration) vastly outweighs the memory savings. Prefix sums use O(n) memory but are fully parallel.
+
+### Lesson
+**Prefix sums are the right primitive for sliding window reductions.** O(n) memory, O(n) time, fully JIT/grad compatible, and both CPU/GPU-friendly. `lax.scan` is great for *expanding* windows (where the carry is O(cols)) but terrible for rolling windows (where the carry needs O(w*cols) for the circular buffer). Only use gather for operations without algebraic inverses (min, max).
+
+---
+
 ## Summary: Performance Lessons
 
 1. **lax.reduce with custom combiner** is the key to fast NaN-aware reductions on CPU

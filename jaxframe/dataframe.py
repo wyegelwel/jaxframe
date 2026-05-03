@@ -763,48 +763,46 @@ class DataFrame:
     def _fast_nansum(block):
         """NaN-skipping sum via single-pass fused lax.reduce."""
         block = block.astype(jnp.float32)
+
         def combiner(a, b):
-            return (
-                jnp.where(jnp.isnan(a), 0.0, a)
-                + jnp.where(jnp.isnan(b), 0.0, b)
-            )
+            return jnp.where(jnp.isnan(a), 0.0, a) + jnp.where(jnp.isnan(b), 0.0, b)
+
         return jax.lax.reduce(block, jnp.float32(0.0), combiner, [0])
 
     @staticmethod
     @jax.jit
     def _fast_nanmin(block):
         """NaN-skipping min via single-pass fused lax.reduce."""
+
         def combiner(a, b):
             return jnp.minimum(
                 jnp.where(jnp.isnan(a), jnp.inf, a),
                 jnp.where(jnp.isnan(b), jnp.inf, b),
             )
-        return jax.lax.reduce(
-            block, jnp.float32(jnp.inf), combiner, [0]
-        )
+
+        return jax.lax.reduce(block, jnp.float32(jnp.inf), combiner, [0])
 
     @staticmethod
     @jax.jit
     def _fast_nanmax(block):
         """NaN-skipping max via single-pass fused lax.reduce."""
+
         def combiner(a, b):
             return jnp.maximum(
                 jnp.where(jnp.isnan(a), -jnp.inf, a),
                 jnp.where(jnp.isnan(b), -jnp.inf, b),
             )
-        return jax.lax.reduce(
-            block, jnp.float32(-jnp.inf), combiner, [0]
-        )
+
+        return jax.lax.reduce(block, jnp.float32(-jnp.inf), combiner, [0])
 
     @staticmethod
     @jax.jit
     def _fast_nanprod(block):
         """NaN-skipping product via single-pass fused lax.reduce."""
+
         def combiner(a, b):
-            return (
-                jnp.where(jnp.isnan(a), 1.0, a)
-                * jnp.where(jnp.isnan(b), 1.0, b)
-            )
+            return jnp.where(jnp.isnan(a), 1.0, a) * jnp.where(jnp.isnan(b), 1.0, b)
+
         return jax.lax.reduce(block, jnp.float32(1.0), combiner, [0])
 
     @staticmethod
@@ -816,11 +814,10 @@ class DataFrame:
         Uses lax.reduce axis=0 (well-optimized) then .sum() on the small column vector.
         """
         block = block.astype(jnp.float32)
+
         def nan_add(a, b):
-            return (
-                jnp.where(jnp.isnan(a), 0.0, a)
-                + jnp.where(jnp.isnan(b), 0.0, b)
-            )
+            return jnp.where(jnp.isnan(a), 0.0, a) + jnp.where(jnp.isnan(b), 0.0, b)
+
         col_sums = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
         valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
         col_counts = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
@@ -831,11 +828,10 @@ class DataFrame:
     def _fast_nansumsq_and_count(block):
         """Total NaN-skipping sum, sum-of-squares, and count for a block, all scalar."""
         block = block.astype(jnp.float32)
+
         def nan_add(a, b):
-            return (
-                jnp.where(jnp.isnan(a), 0.0, a)
-                + jnp.where(jnp.isnan(b), 0.0, b)
-            )
+            return jnp.where(jnp.isnan(a), 0.0, a) + jnp.where(jnp.isnan(b), 0.0, b)
+
         col_sums = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
         clean = jnp.where(jnp.isnan(block), 0.0, block)
         col_sumsq = jax.lax.reduce(clean * clean, jnp.float32(0.0), jax.lax.add, [0])
@@ -849,12 +845,15 @@ class DataFrame:
         """NaN-skipping mean via single-pass multi-operand lax.reduce."""
         clean = jnp.where(jnp.isnan(block), 0.0, block)
         valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+
         def combiner(a, b):
             return (a[0] + b[0], a[1] + b[1])
+
         total, count = jax.lax.reduce(
             (clean, valid),
             (jnp.float32(0.0), jnp.float32(0.0)),
-            combiner, [0],
+            combiner,
+            [0],
         )
         return total / jnp.maximum(count, 1)
 
@@ -864,12 +863,15 @@ class DataFrame:
         """NaN-skipping variance via single-pass multi-operand lax.reduce."""
         clean = jnp.where(jnp.isnan(block), 0.0, block)
         valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
+
         def combiner(a, b):
             return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
         total, total_sq, count = jax.lax.reduce(
             (clean, clean * clean, valid),
             (jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0)),
-            combiner, [0],
+            combiner,
+            [0],
         )
         mean = total / jnp.maximum(count, 1)
         return (total_sq - count * mean * mean) / jnp.maximum(count - ddof, 1)
@@ -938,9 +940,7 @@ class DataFrame:
                 s, c = self._fast_nansum_and_count(blocks[0])
                 return s / jnp.maximum(c, 1)
             # Multi-dtype: concat all blocks (promoted to float32) and reduce once
-            combined = jnp.concatenate(
-                [b.astype(jnp.float32).reshape(-1) for b in blocks]
-            )
+            combined = jnp.concatenate([b.astype(jnp.float32).reshape(-1) for b in blocks])
             s, c = self._fast_nansum_and_count(combined.reshape(1, -1))
             return s / jnp.maximum(c, 1)
 
@@ -1004,9 +1004,7 @@ class DataFrame:
 
         if axis == 0:
             ddof_arr = jnp.float32(ddof)
-            return self._reduce_axis0(
-                lambda b: self._fast_nanvar(b, ddof_arr), "var"
-            )
+            return self._reduce_axis0(lambda b: self._fast_nanvar(b, ddof_arr), "var")
         result = jnp.nanvar(self._numeric_data, axis=axis, ddof=ddof)
         return Series(result, index=self._index, name="var")
 
@@ -1424,8 +1422,7 @@ class DataFrame:
             order = order[::-1]
         # Data computation: JAX gather
         new_blocks = {
-            dt: jnp.take(block, order, axis=0)
-            for dt, block in self._dtype_blocks.items()
+            dt: jnp.take(block, order, axis=0) for dt, block in self._dtype_blocks.items()
         }
         # Index is static aux data in pytree — keep original under JIT
         return DataFrame._from_parts(
@@ -1471,49 +1468,30 @@ class DataFrame:
                 # Invert permutation: ranks[order[i]] = i+1
                 ranks = np.empty_like(order, dtype=np.float32)
                 arange = np.arange(1, n + 1, dtype=np.float32)
-                np.put_along_axis(
-                    ranks, order, arange[:, None], axis=0
-                )
+                np.put_along_axis(ranks, order, arange[:, None], axis=0)
                 return jnp.asarray(ranks)
             elif method == "average":
-                order = np.argsort(
-                    block_np, axis=0, kind="mergesort"
-                )
-                sorted_block = np.take_along_axis(
-                    block_np, order, axis=0
-                )
+                order = np.argsort(block_np, axis=0, kind="mergesort")
+                sorted_block = np.take_along_axis(block_np, order, axis=0)
                 # Detect tie boundaries across all columns
-                same_as_next = np.zeros(
-                    (n, block_np.shape[1]), dtype=bool
-                )
-                same_as_next[:-1] = (
-                    sorted_block[:-1] == sorted_block[1:]
-                )
+                same_as_next = np.zeros((n, block_np.shape[1]), dtype=bool)
+                same_as_next[:-1] = sorted_block[:-1] == sorted_block[1:]
                 # Group IDs per column (cumsum of boundaries)
                 group_id = np.cumsum(~same_as_next, axis=0)
-                zeros = np.zeros(
-                    (1, block_np.shape[1]), dtype=group_id.dtype
-                )
-                group_id = np.concatenate(
-                    [zeros, group_id[:-1]], axis=0
-                )
+                zeros = np.zeros((1, block_np.shape[1]), dtype=group_id.dtype)
+                group_id = np.concatenate([zeros, group_id[:-1]], axis=0)
                 # Average rank per group via numpy bincount
-                ordinal_ranks = np.arange(
-                    1, n + 1, dtype=np.float64
-                )
+                ordinal_ranks = np.arange(1, n + 1, dtype=np.float64)
                 num_groups = group_id.max() + 1
-                ranks = np.empty(
-                    (n, block_np.shape[1]), dtype=np.float32
-                )
+                ranks = np.empty((n, block_np.shape[1]), dtype=np.float32)
                 for c in range(block_np.shape[1]):
                     gid = group_id[:, c]
                     sums = np.bincount(
-                        gid, weights=ordinal_ranks,
+                        gid,
+                        weights=ordinal_ranks,
                         minlength=num_groups,
                     )
-                    counts = np.bincount(
-                        gid, minlength=num_groups
-                    )
+                    counts = np.bincount(gid, minlength=num_groups)
                     avg = sums / np.maximum(counts, 1)
                     sorted_avg = avg[gid].astype(np.float32)
                     col_ranks = np.empty(n, dtype=np.float32)
@@ -1525,18 +1503,12 @@ class DataFrame:
             else:
                 # Fallback: ordinal
                 if ascending:
-                    order = np.argsort(
-                        block_np, axis=0, kind="quicksort"
-                    )
+                    order = np.argsort(block_np, axis=0, kind="quicksort")
                 else:
-                    order = np.argsort(
-                        -block_np, axis=0, kind="quicksort"
-                    )
+                    order = np.argsort(-block_np, axis=0, kind="quicksort")
                 ranks = np.empty_like(order, dtype=np.float32)
                 arange = np.arange(1, n + 1, dtype=np.float32)
-                np.put_along_axis(
-                    ranks, order, arange[:, None], axis=0
-                )
+                np.put_along_axis(ranks, order, arange[:, None], axis=0)
                 return jnp.asarray(ranks)
 
         return self._apply_blockwise(_rank_block)
@@ -3337,6 +3309,7 @@ def _fillna_block(block, value):
 
 def _make_rolling_fn(reduce_fn):
     """Create a JIT'd rolling block function for a given reduction."""
+
     @jax.jit
     def _fn(block, idx, valid, min_periods):
         gathered = block[idx]
@@ -3345,55 +3318,75 @@ def _make_rolling_fn(reduce_fn):
         n_valid = jnp.sum(valid, axis=1)
         result = reduce_fn(gathered)
         return jnp.where(n_valid[:, None] >= min_periods, result, jnp.nan)
+
     return _fn
 
 
-_rolling_sum_block = _make_rolling_fn(lambda g: jnp.nansum(g, axis=1))
 _rolling_min_block = _make_rolling_fn(lambda g: jnp.nanmin(g, axis=1))
 _rolling_max_block = _make_rolling_fn(lambda g: jnp.nanmax(g, axis=1))
 
 
-@jax.jit
-def _rolling_mean_block(block, idx, valid, min_periods):
-    """Rolling mean via sum/count (avoids slow jnp.nanmean)."""
-    gathered = block[idx]
-    mask = valid[:, :, None]
-    clean = jnp.where(mask, gathered, 0.0)
-    count = jnp.sum(mask, axis=1)
-    total = jnp.sum(clean, axis=1)
-    n_valid = jnp.sum(valid, axis=1)
-    result = total / jnp.maximum(count, 1)
-    return jnp.where(n_valid[:, None] >= min_periods, result, jnp.nan)
+def _rolling_prefix_sums(block, window):
+    """Shared prefix-sum setup for O(n) rolling ops."""
+    valid = ~jnp.isnan(block)
+    clean = jnp.where(valid, block, 0.0)
+    n, cols = block.shape
+    z = jnp.zeros((1, cols), dtype=clean.dtype)
+    cum = jnp.concatenate([z, jnp.cumsum(clean, axis=0)], axis=0)
+    cum_valid = jnp.concatenate(
+        [jnp.zeros((1, cols), dtype=jnp.float32), jnp.cumsum(valid.astype(jnp.float32), axis=0)],
+        axis=0,
+    )
+    end = jnp.arange(1, n + 1)
+    start = jnp.maximum(end - window, 0)
+    rolling_sum = cum[end] - cum[start]
+    rolling_count = cum_valid[end] - cum_valid[start]
+    return clean, rolling_sum, rolling_count
 
 
 @jax.jit
-def _rolling_var_block(block, idx, valid, min_periods):
-    """Rolling variance via sum/sumsq/count (avoids slow jnp.nanvar)."""
-    gathered = block[idx]
-    mask = valid[:, :, None]
-    clean = jnp.where(mask, gathered, 0.0)
-    count = jnp.sum(mask, axis=1)
-    total = jnp.sum(clean, axis=1)
-    total_sq = jnp.sum(clean * clean, axis=1)
-    mean = total / jnp.maximum(count, 1)
-    n_valid = jnp.sum(valid, axis=1)
-    var = (total_sq - count * mean * mean) / jnp.maximum(count - 1, 1)
-    return jnp.where(n_valid[:, None] >= min_periods, var, jnp.nan)
+def _rolling_sum_cumsum(block, window, min_periods):
+    """Rolling sum via prefix sums — O(n) memory."""
+    _, rolling_sum, rolling_count = _rolling_prefix_sums(block, window)
+    return jnp.where(rolling_count >= min_periods, rolling_sum, jnp.nan)
 
 
 @jax.jit
-def _rolling_std_block(block, idx, valid, min_periods):
-    """Rolling std via sum/sumsq/count (avoids slow jnp.nanstd)."""
-    gathered = block[idx]
-    mask = valid[:, :, None]
-    clean = jnp.where(mask, gathered, 0.0)
-    count = jnp.sum(mask, axis=1)
-    total = jnp.sum(clean, axis=1)
-    total_sq = jnp.sum(clean * clean, axis=1)
-    mean = total / jnp.maximum(count, 1)
-    n_valid = jnp.sum(valid, axis=1)
-    var = (total_sq - count * mean * mean) / jnp.maximum(count - 1, 1)
-    return jnp.where(n_valid[:, None] >= min_periods, jnp.sqrt(jnp.maximum(var, 0)), jnp.nan)
+def _rolling_mean_cumsum(block, window, min_periods):
+    """Rolling mean via prefix sums — O(n) memory."""
+    _, rolling_sum, rolling_count = _rolling_prefix_sums(block, window)
+    mean = rolling_sum / jnp.maximum(rolling_count, 1)
+    return jnp.where(rolling_count >= min_periods, mean, jnp.nan)
+
+
+@jax.jit
+def _rolling_var_cumsum(block, window, min_periods):
+    """Rolling variance via prefix sums — O(n) memory."""
+    clean, rolling_sum, rolling_count = _rolling_prefix_sums(block, window)
+    n, cols = block.shape
+    z = jnp.zeros((1, cols), dtype=clean.dtype)
+    cum_sq = jnp.concatenate([z, jnp.cumsum(clean * clean, axis=0)], axis=0)
+    end = jnp.arange(1, n + 1)
+    start = jnp.maximum(end - window, 0)
+    rolling_sq = cum_sq[end] - cum_sq[start]
+    mean = rolling_sum / jnp.maximum(rolling_count, 1)
+    var = (rolling_sq - rolling_count * mean * mean) / jnp.maximum(rolling_count - 1, 1)
+    return jnp.where(rolling_count >= min_periods, var, jnp.nan)
+
+
+@jax.jit
+def _rolling_std_cumsum(block, window, min_periods):
+    """Rolling std via prefix sums — O(n) memory."""
+    clean, rolling_sum, rolling_count = _rolling_prefix_sums(block, window)
+    n, cols = block.shape
+    z = jnp.zeros((1, cols), dtype=clean.dtype)
+    cum_sq = jnp.concatenate([z, jnp.cumsum(clean * clean, axis=0)], axis=0)
+    end = jnp.arange(1, n + 1)
+    start = jnp.maximum(end - window, 0)
+    rolling_sq = cum_sq[end] - cum_sq[start]
+    mean = rolling_sum / jnp.maximum(rolling_count, 1)
+    var = (rolling_sq - rolling_count * mean * mean) / jnp.maximum(rolling_count - 1, 1)
+    return jnp.where(rolling_count >= min_periods, jnp.sqrt(jnp.maximum(var, 0)), jnp.nan)
 
 
 class Rolling:
@@ -3404,28 +3397,12 @@ class Rolling:
         self._window = window
         self._min_periods = min_periods
 
-    def _apply(self, block_fn):
-        """Apply a JIT'd rolling block function to each dtype block."""
-        new_blocks = {}
-        min_periods = jnp.int32(self._min_periods)
-        for dtype, block in self._df._dtype_blocks.items():
-            idx, valid = _rolling_window(block, self._window)
-            idx = jnp.array(idx)
-            valid = jnp.array(valid)
-            result = block_fn(block, idx, valid, min_periods)
-            new_blocks[result.dtype] = result
-
+    def _build_result(self, new_blocks):
+        """Build DataFrame from new dtype blocks, remapping column_to_block."""
+        dtype_map = dict(zip(self._df._dtype_blocks.keys(), new_blocks.keys()))
         new_col_to_block = {}
         for col, (old_dtype, col_idx) in self._df._column_to_block.items():
-            new_dtype = new_blocks[
-                next(
-                    nd
-                    for od, nd in zip(self._df._dtype_blocks.keys(), new_blocks.keys())
-                    if od == old_dtype
-                )
-            ].dtype
-            new_col_to_block[col] = (new_dtype, col_idx)
-
+            new_col_to_block[col] = (dtype_map[old_dtype], col_idx)
         return DataFrame._from_parts(
             dtype_blocks=new_blocks,
             column_to_block=new_col_to_block,
@@ -3434,34 +3411,57 @@ class Rolling:
             column_order=self._df._column_order,
         )
 
+    def _apply_cumsum(self, block_fn):
+        """Apply a prefix-sum rolling function — O(n) memory."""
+        new_blocks = {}
+        window = jnp.int32(self._window)
+        min_periods = jnp.int32(self._min_periods)
+        for dtype, block in self._df._dtype_blocks.items():
+            result = block_fn(block, window, min_periods)
+            new_blocks[result.dtype] = result
+        return self._build_result(new_blocks)
+
+    def _apply_gather(self, block_fn):
+        """Apply a gather-based rolling function — O(n*w) memory. Used for min/max."""
+        new_blocks = {}
+        min_periods = jnp.int32(self._min_periods)
+        for dtype, block in self._df._dtype_blocks.items():
+            idx, valid = _rolling_window(block, self._window)
+            idx = jnp.array(idx)
+            valid = jnp.array(valid)
+            result = block_fn(block, idx, valid, min_periods)
+            new_blocks[result.dtype] = result
+        return self._build_result(new_blocks)
+
     def sum(self):
         """Rolling sum."""
-        return self._apply(_rolling_sum_block)
+        return self._apply_cumsum(_rolling_sum_cumsum)
 
     def mean(self):
         """Rolling mean."""
-        return self._apply(_rolling_mean_block)
+        return self._apply_cumsum(_rolling_mean_cumsum)
 
     def var(self, ddof: int = 1):
         """Rolling variance."""
-        return self._apply(_rolling_var_block)
+        return self._apply_cumsum(_rolling_var_cumsum)
 
     def std(self, ddof: int = 1):
         """Rolling standard deviation."""
-        return self._apply(_rolling_std_block)
+        return self._apply_cumsum(_rolling_std_cumsum)
 
     def min(self):
         """Rolling minimum."""
-        return self._apply(_rolling_min_block)
+        return self._apply_gather(_rolling_min_block)
 
     def max(self):
         """Rolling maximum."""
-        return self._apply(_rolling_max_block)
+        return self._apply_gather(_rolling_max_block)
 
 
 @jax.jit
 def _expanding_sum_block(block, min_periods):
     """JIT'd expanding sum via scan."""
+
     def scan_fn(carry, x):
         running_sum, count = carry
         is_valid = ~jnp.isnan(x)
@@ -3469,6 +3469,7 @@ def _expanding_sum_block(block, min_periods):
         count = count + is_valid.astype(jnp.int32)
         result = jnp.where(count >= min_periods, running_sum, jnp.nan)
         return (running_sum, count), result
+
     n_cols = block.shape[1]
     init = (jnp.zeros(n_cols, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
     _, result = jax.lax.scan(scan_fn, init, block)
@@ -3478,6 +3479,7 @@ def _expanding_sum_block(block, min_periods):
 @jax.jit
 def _expanding_mean_block(block, min_periods):
     """JIT'd expanding mean via scan."""
+
     def scan_fn(carry, x):
         running_sum, count = carry
         is_valid = ~jnp.isnan(x)
@@ -3486,6 +3488,7 @@ def _expanding_mean_block(block, min_periods):
         mean = running_sum / jnp.maximum(count, 1)
         result = jnp.where(count >= min_periods, mean, jnp.nan)
         return (running_sum, count), result
+
     n_cols = block.shape[1]
     init = (jnp.zeros(n_cols, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
     _, result = jax.lax.scan(scan_fn, init, block)
@@ -3495,6 +3498,7 @@ def _expanding_mean_block(block, min_periods):
 @jax.jit
 def _expanding_var_block(block, min_periods, ddof):
     """JIT'd expanding variance via Welford's algorithm."""
+
     def scan_fn(carry, x):
         mean, m2, count = carry
         is_valid = ~jnp.isnan(x)
@@ -3509,6 +3513,7 @@ def _expanding_var_block(block, min_periods, ddof):
         var = new_m2 / denom
         result = jnp.where((new_count >= min_periods) & (new_count > ddof), var, jnp.nan)
         return (new_mean, new_m2, new_count), result
+
     n_cols = block.shape[1]
     init = (
         jnp.zeros(n_cols, dtype=block.dtype),
@@ -3522,6 +3527,7 @@ def _expanding_var_block(block, min_periods, ddof):
 @jax.jit
 def _expanding_min_block(block, min_periods):
     """JIT'd expanding min via scan."""
+
     def scan_fn(carry, x):
         running_min, count = carry
         is_valid = ~jnp.isnan(x)
@@ -3529,6 +3535,7 @@ def _expanding_min_block(block, min_periods):
         count = count + is_valid.astype(jnp.int32)
         result = jnp.where(count >= min_periods, candidate, jnp.nan)
         return (candidate, count), result
+
     n_cols = block.shape[1]
     init = (jnp.full(n_cols, jnp.inf, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
     _, result = jax.lax.scan(scan_fn, init, block)
@@ -3538,6 +3545,7 @@ def _expanding_min_block(block, min_periods):
 @jax.jit
 def _expanding_max_block(block, min_periods):
     """JIT'd expanding max via scan."""
+
     def scan_fn(carry, x):
         running_max, count = carry
         is_valid = ~jnp.isnan(x)
@@ -3545,6 +3553,7 @@ def _expanding_max_block(block, min_periods):
         count = count + is_valid.astype(jnp.int32)
         result = jnp.where(count >= min_periods, candidate, jnp.nan)
         return (candidate, count), result
+
     n_cols = block.shape[1]
     init = (
         jnp.full(n_cols, -jnp.inf, dtype=block.dtype),
@@ -3634,11 +3643,13 @@ class Expanding:
 @jax.jit
 def _ewm_mean_block(block, alpha):
     """JIT'd EWM mean via scan."""
+
     def scan_fn(carry, x):
         weighted_sum, total_weight = carry
         weighted_sum = alpha * x + (1 - alpha) * weighted_sum
         total_weight = alpha + (1 - alpha) * total_weight
         return (weighted_sum, total_weight), weighted_sum / total_weight
+
     n_cols = block.shape[1]
     init = (jnp.zeros(n_cols), jnp.zeros(n_cols))
     _, result = jax.lax.scan(scan_fn, init, block)
@@ -3648,12 +3659,14 @@ def _ewm_mean_block(block, alpha):
 @jax.jit
 def _ewm_var_block(block, alpha, min_periods):
     """JIT'd EWM variance via scan."""
+
     def scan_fn(carry, x):
         old_mean, old_var, total_weight = carry
         total_weight = alpha + (1 - alpha) * total_weight
         new_mean = alpha * x + (1 - alpha) * old_mean
         new_var = (1 - alpha) * (old_var + alpha * (x - old_mean) ** 2)
         return (new_mean, new_var, total_weight), (new_var / total_weight, total_weight)
+
     n_cols = block.shape[1]
     init = (block[0], jnp.zeros(n_cols), jnp.zeros(n_cols))
     _, (var_raw, _weights) = jax.lax.scan(scan_fn, init, block)
@@ -3973,9 +3986,7 @@ class DataFrameGroupBy:
     def std(self, ddof=1):
         ddof_arr = jnp.float32(ddof)
         return self._apply_segment_op(
-            lambda d: jnp.sqrt(
-                _segment_var(d, self._segment_ids, self._num_groups, ddof_arr)
-            )
+            lambda d: jnp.sqrt(_segment_var(d, self._segment_ids, self._num_groups, ddof_arr))
         )
 
     def var(self, ddof=1):

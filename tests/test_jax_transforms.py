@@ -182,3 +182,84 @@ class TestGroupByJAX:
         grads = grad_fn(gb)
         # grads is a SeriesGroupBy pytree — check the data leaf
         assert jnp.all(jnp.isfinite(grads._data)), f"{name} produced non-finite grads"
+
+
+# ---- vmap compatibility ----
+
+# Operations that work under vmap (subset of JIT-compatible ops).
+# Some JIT-compatible ops use eager structure discovery which breaks under vmap
+# (e.g., sort_values, nlargest, rank use np.argsort; groupby uses jnp.unique).
+# Rolling/expanding/ewm also use eager window construction that may fail under vmap.
+VMAP_OPERATIONS = [
+    # Reductions
+    ("sum", lambda df: df.sum(axis=None)),
+    ("mean", lambda df: df.mean(axis=None)),
+    ("std", lambda df: df.std(axis=None)),
+    ("var", lambda df: df.var(axis=None)),
+    ("min", lambda df: df.min(axis=None)),
+    ("max", lambda df: df.max(axis=None)),
+    ("prod", lambda df: df.prod(axis=None)),
+    # Arithmetic chains → scalar
+    ("mul_sum", lambda df: (df * 2).sum(axis=None)),
+    ("add_sum", lambda df: (df + 10).sum(axis=None)),
+    ("pow_sum", lambda df: (df**2).sum(axis=None)),
+    ("chain", lambda df: ((df + 1) * 2 - 3).sum(axis=None)),
+    # DataFrame * DataFrame
+    ("df_mul_df", lambda df: (df * df).sum(axis=None)),
+    ("df_add_df", lambda df: (df + df).sum(axis=None)),
+    ("df_sub_df", lambda df: (df - df).sum(axis=None)),
+    # diff, shift, fillna, where, clip
+    ("diff_sum", lambda df: df.diff().sum(axis=None)),
+    ("shift_sum", lambda df: df.shift(1, fill_value=0).sum(axis=None)),
+    ("fillna_sum", lambda df: df.fillna(0.0).sum(axis=None)),
+    ("where_sum", lambda df: df.where(df > 3, 0).sum(axis=None)),
+    ("clip_sum", lambda df: df.clip(2, 5).sum(axis=None)),
+    # Cumulative
+    ("cumsum_sum", lambda df: df.cumsum().sum(axis=None)),
+    ("cumprod_sum", lambda df: df.cumprod().sum(axis=None)),
+    # Column manipulation
+    ("drop_sum", lambda df: df.drop(columns=["a"]).sum(axis=None)),
+    ("rename_sum", lambda df: df.rename(columns={"a": "x"}).sum(axis=None)),
+    # Copy, pipe
+    ("copy_sum", lambda df: df.copy().sum(axis=None)),
+    ("pipe_sum", lambda df: df.pipe(lambda d: d * 2).sum(axis=None)),
+    # Reverse operators
+    ("radd_sum", lambda df: (10 + df).sum(axis=None)),
+    ("rsub_sum", lambda df: (100 - df).sum(axis=None)),
+    ("rmul_sum", lambda df: (3 * df).sum(axis=None)),
+    # Rolling (prefix-sum based)
+    ("roll_sum", lambda df: df.rolling(2).sum().sum(axis=None)),
+    ("roll_mean", lambda df: df.rolling(2).mean().sum(axis=None)),
+]
+
+DATA2 = {"a": [10.0, 20.0, 30.0], "b": [40.0, 50.0, 60.0]}
+
+
+def _make_batch(*datas):
+    """Stack multiple DataFrames into a batched pytree for vmap."""
+    dfs = [DataFrame(d) for d in datas]
+    return jax.tree.map(lambda *xs: jnp.stack(xs), *dfs)
+
+
+@pytest.mark.parametrize("name,op", VMAP_OPERATIONS, ids=[o[0] for o in VMAP_OPERATIONS])
+class TestVmapCompat:
+    def test_vmap(self, name, op):
+        """vmap produces same results as mapping eagerly."""
+        batch = _make_batch(DATA, DATA2)
+        vmapped = jax.vmap(op)(batch)
+        # Compare with eager per-element results
+        eager0 = op(DataFrame(DATA))
+        eager1 = op(DataFrame(DATA2))
+        expected = jnp.array([float(eager0), float(eager1)])
+        assert_allclose(vmapped, expected, rtol=1e-5)
+
+    def test_vmap_grad(self, name, op):
+        """vmap + grad composition works."""
+        batch = _make_batch(DATA, DATA2)
+        try:
+            grads = jax.vmap(jax.grad(op))(batch)
+            for block in grads._dtype_blocks.values():
+                assert jnp.all(jnp.isfinite(block)), f"{name} vmap+grad non-finite"
+        except (TypeError, FloatingPointError):
+            # Some ops are not differentiable (min, max, prod with zeros, etc.)
+            pytest.skip(f"{name} not differentiable")

@@ -28,6 +28,23 @@ Three phases, ~230 new API members, 310 new tests (898 passing total):
    (5460), rank 4.1ms (60ms), corr 56us (661), sum-axis0 61us (403),
    sort_values 3.4ms (4.3ms).
 
+### Addendum 2 (same day): apples-to-apples CPU pass
+Re-ran the suite with JAX_PLATFORMS=cpu (same box, no GPU). Initial CPU score
+26/30 with real losses: sort_values 0.32x, rank 0.45x (XLA's CPU sort is ~10x
+slower than numpy's), mean 0.44x (unfused NaN-masking passes). Fixes:
+- **Eager CPU numpy fast paths** for sort_values/rank: structure discovery is
+  already eager, so when the array is concrete AND on CPU (np.asarray is
+  zero-copy there), use np.argsort/np.lexsort. JIT/GPU paths unchanged.
+- **rank without searchsorted**: two binary searches over 1M elems cost
+  ~350ms/col; single stable argsort + linear run-length min/max/dense passes
+  is ~4x faster (111ms/col). Ranks scatter back through the argsort.
+- **NaN-free fast path via lax.cond**: a plain sum is NaN iff the block has
+  NaNs, so compute plain reduce first and only pay the NaN-masked reduce +
+  isnan count when it actually returns NaN. Differentiable through both
+  branches. mean went 0.70x -> 4.2x.
+Final CPU score: 29/30 wins (sort_values 0.95x = parity; np.argsort dominates
+both us and pandas). GPU score unchanged at 30/30.
+
 ### Addendum (same day): sequential-scan windows were the last pandas losses
 Full benchmark run (174 cells) showed 27 wins / 3 losses at the largest sizes —
 the losses were expanding sum/mean and ewm mean at 1M rows: **~30 seconds** vs

@@ -849,13 +849,23 @@ class DataFrame:
         """
         block = block.astype(jnp.float32)
 
-        def nan_add(a, b):
-            return jnp.where(jnp.isnan(a), 0.0, a) + jnp.where(jnp.isnan(b), 0.0, b)
+        # NaN-free fast path: a plain sum is NaN iff the block has NaNs, so
+        # only pay for NaN masking when actually needed (lax.cond, still
+        # differentiable through both branches).
+        plain = jax.lax.reduce(block, jnp.float32(0.0), jax.lax.add, [0, 1])
 
-        col_sums = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
-        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
-        col_counts = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
-        return col_sums.sum(), col_counts.sum()
+        def _no_nan(_):
+            return plain, jnp.float32(block.size)
+
+        def _with_nan(_):
+            def nan_add(a, b):
+                return jnp.where(jnp.isnan(a), 0.0, a) + jnp.where(jnp.isnan(b), 0.0, b)
+
+            s = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0, 1])
+            count = block.size - jnp.sum(jnp.isnan(block))
+            return s, count.astype(jnp.float32)
+
+        return jax.lax.cond(jnp.isnan(plain), _with_nan, _no_nan, None)
 
     @staticmethod
     @jax.jit
@@ -881,11 +891,22 @@ class DataFrame:
         Single-operand lax.reduce is differentiable (tuple-operand is not:
         its transpose can't handle symbolic Zero cotangents); XLA fuses the
         two passes under JIT anyway."""
-        clean = jnp.where(jnp.isnan(block), 0.0, block)
-        valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
-        total = jax.lax.reduce(clean, jnp.float32(0.0), jax.lax.add, [0])
-        count = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
-        return total / jnp.maximum(count, 1)
+        block = block.astype(jnp.float32)
+        # NaN-free fast path (see _fast_nansum_and_count)
+        plain = jax.lax.reduce(block, jnp.float32(0.0), jax.lax.add, [0])
+
+        def _no_nan(_):
+            return plain / block.shape[0]
+
+        def _with_nan(_):
+            def nan_add(a, b):
+                return jnp.where(jnp.isnan(a), 0.0, a) + jnp.where(jnp.isnan(b), 0.0, b)
+
+            total = jax.lax.reduce(block, jnp.float32(0.0), nan_add, [0])
+            count = block.shape[0] - jnp.sum(jnp.isnan(block), axis=0)
+            return total / jnp.maximum(count, 1)
+
+        return jax.lax.cond(jnp.any(jnp.isnan(plain)), _with_nan, _no_nan, None)
 
     @staticmethod
     @jax.jit
@@ -1446,7 +1467,14 @@ class DataFrame:
             keys.append(k if asc else -k)
         dtypes_order = list(self._dtype_blocks.keys())
         blocks = tuple(self._dtype_blocks[dt] for dt in dtypes_order)
-        if len(keys) == 1:
+        if _on_cpu(keys[0]):
+            # Eager CPU: np.argsort beats XLA CPU sort ~10x; np.asarray is zero-copy
+            if len(keys) == 1:
+                order = jnp.asarray(np.argsort(np.asarray(keys[0]), kind="stable"))
+            else:
+                order = jnp.asarray(np.lexsort([np.asarray(k) for k in keys[::-1]]))
+            sorted_blocks = tuple(jnp.take(b, order, axis=0) for b in blocks)
+        elif len(keys) == 1:
             sorted_blocks, order = _argsort_take_blocks(blocks, keys[0])
         else:
             # lexsort: last key is primary
@@ -1494,6 +1522,12 @@ class DataFrame:
         """
 
         def _rank_block(block):
+            if _on_cpu(block):
+                block_np = np.asarray(block)
+                ranks = np.empty(block_np.shape, dtype=np.float32)
+                for c in range(block_np.shape[1]):
+                    ranks[:, c] = _rank_1d_np(block_np[:, c], method=method, ascending=ascending)
+                return jnp.asarray(ranks)
             return jax.vmap(
                 lambda col: _rank_1d(col, method=method, ascending=ascending),
                 in_axes=1,
@@ -3908,6 +3942,57 @@ def _is_tracer(x) -> bool:
     return isinstance(x, jax.core.Tracer)
 
 
+def _on_cpu(arr) -> bool:
+    """True if arr is a concrete array living on CPU (eager numpy fast paths
+    are only worthwhile there — np.asarray is zero-copy on CPU)."""
+    if _is_tracer(arr):
+        return False
+    try:
+        return next(iter(arr.devices())).platform == "cpu"
+    except AttributeError:
+        return True  # plain numpy array
+
+
+def _rank_1d_np(x, method: str = "average", ascending: bool = True):
+    """Numpy twin of _rank_1d for eager CPU frames.
+
+    Single argsort + linear run-length passes (no searchsorted: two binary
+    searches over 1M elements cost ~350ms/col; this is ~4x faster)."""
+    v = x if ascending else -x
+    isnan = np.isnan(v)
+    n = len(v)
+    order = np.argsort(v, kind="stable")
+    idx1 = np.arange(1, n + 1, dtype=np.float32)
+    if method in ("first", "ordinal"):
+        ranks_sorted = idx1
+    else:
+        sorted_v = v[order]
+        new_run = np.empty(n, dtype=bool)
+        new_run[0] = True
+        # NaN != NaN makes each NaN its own run — harmless, they're masked below
+        new_run[1:] = sorted_v[1:] != sorted_v[:-1]
+        if method == "dense":
+            ranks_sorted = np.cumsum(new_run).astype(np.float32)
+        elif method == "min":
+            ranks_sorted = np.maximum.accumulate(np.where(new_run, idx1, 0.0))
+        else:
+            rmin = np.maximum.accumulate(np.where(new_run, idx1, 0.0))
+            last_of_run = np.empty(n, dtype=bool)
+            last_of_run[-1] = True
+            last_of_run[:-1] = new_run[1:]
+            rmax = np.minimum.accumulate(np.where(last_of_run, idx1, n + 1.0)[::-1])[::-1]
+            if method == "max":
+                ranks_sorted = rmax
+            elif method == "average":
+                ranks_sorted = (rmin + rmax) / 2.0
+            else:
+                raise ValueError(f"unsupported rank method: {method}")
+    ranks = np.empty(n, dtype=np.float32)
+    ranks[order] = ranks_sorted
+    ranks[isnan] = np.nan
+    return ranks
+
+
 @jax.jit
 def _argsort_take_blocks(blocks, key):
     """Fused argsort + gather for sort_values: one compiled kernel instead of
@@ -5014,7 +5099,12 @@ class Series:
     def sort_values(self, ascending=True, na_position="last"):
         """Sort by values. JIT-compatible (jnp.argsort + gather); index follows
         the sort when eager, stays put under a trace (static aux data)."""
-        order = jnp.argsort(self._data if ascending else -self._data, stable=True)
+        key = self._data if ascending else -self._data
+        if _on_cpu(key):
+            order = np.argsort(np.asarray(key), kind="stable")
+            data = jnp.take(self._data, jnp.asarray(order), axis=0)
+            return Series(data, index=self._index[order], name=self._name)
+        order = jnp.argsort(key, stable=True)
         data = jnp.take(self._data, order, axis=0)
         index = self._index if _is_tracer(order) else self._index[np.asarray(order)]
         return Series(data, index=index, name=self._name)
@@ -5031,7 +5121,11 @@ class Series:
         )
 
     def rank(self, method="average", ascending=True):
-        """Rank values, pandas semantics (JIT-compatible)."""
+        """Rank values, pandas semantics (JIT-compatible; numpy fast path on eager CPU)."""
+        if _on_cpu(self._data):
+            return self._new(
+                jnp.asarray(_rank_1d_np(np.asarray(self._data), method=method, ascending=ascending))
+            )
         return self._new(_rank_1d(self._data, method=method, ascending=ascending))
 
     def nlargest(self, n: int = 5):

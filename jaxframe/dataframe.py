@@ -276,7 +276,7 @@ class DataFrame:
         """
         if isinstance(data, dict):
             self._init_from_dict(data, index)
-        elif isinstance(data, (np.ndarray, jnp.ndarray)):
+        elif isinstance(data, np.ndarray | jnp.ndarray):
             self._init_from_array(data, index)
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
@@ -2504,7 +2504,7 @@ class DataFrame:
         Returns:
             New DataFrame with boolean results
         """
-        if isinstance(other, (int, float, bool, np.number)):
+        if isinstance(other, int | float | bool | np.number):
             # Scalar comparison - apply to each dtype block
             new_dtype_blocks = {}
             bool_dtype = np.dtype(bool)
@@ -2564,7 +2564,7 @@ class DataFrame:
                 column_order=tuple(col_names),
             )
 
-        elif isinstance(other, (np.ndarray, jnp.ndarray)):
+        elif isinstance(other, np.ndarray | jnp.ndarray):
             # Array comparison
             other_arr = jnp.asarray(other)
             new_dtype_blocks = {}
@@ -2608,7 +2608,7 @@ class DataFrame:
         Returns:
             New DataFrame with result
         """
-        if isinstance(other, (int, float, bool, np.number)):
+        if isinstance(other, int | float | bool | np.number):
             # Scalar operation: apply to each block independently
             new_blocks = {}
             dtype_map = {}  # old_dtype -> new_dtype
@@ -2710,7 +2710,7 @@ class DataFrame:
                 col_arrays, self._column_order, self._index.copy(), self._object_data.copy()
             )
 
-        elif isinstance(other, (np.ndarray, jnp.ndarray)):
+        elif isinstance(other, np.ndarray | jnp.ndarray):
             # Array operation
             other_arr = jnp.asarray(other)
 
@@ -2918,6 +2918,157 @@ class _ILocIndexer:
                 )
 
 
+# ============================
+# Shared JIT-compatible kernels
+# ============================
+
+_MISSING = object()  # sentinel: distinguish "not passed" from None
+
+
+class _Flags:
+    """Minimal pandas.Flags stand-in (jaxframe does not use flags)."""
+
+    allows_duplicate_labels = True
+
+    def __repr__(self):
+        return "<Flags(allows_duplicate_labels=True)>"
+
+
+def _is_tracer(x) -> bool:
+    """True if x is a JAX tracer (inside a jit/grad trace)."""
+    return isinstance(x, jax.core.Tracer)
+
+
+def _ffill_array(arr, axis: int = 0):
+    """Forward-fill NaNs along axis. JIT-compatible, grad flows through gather.
+
+    Uses the running-max-of-valid-indices trick: no dynamic shapes.
+    """
+    isnan = jnp.isnan(arr)
+    n = arr.shape[axis]
+    shape = [1] * arr.ndim
+    shape[axis] = n
+    idx = jnp.arange(n).reshape(shape)
+    idx = jnp.broadcast_to(idx, arr.shape)
+    valid_idx = jnp.where(isnan, -1, idx)
+    last_valid = jax.lax.cummax(valid_idx, axis=axis)
+    gathered = jnp.take_along_axis(arr, jnp.maximum(last_valid, 0), axis=axis)
+    return jnp.where(last_valid < 0, jnp.nan, gathered)
+
+
+def _bfill_array(arr, axis: int = 0):
+    """Backward-fill NaNs along axis. JIT-compatible, grad flows through gather."""
+    flipped = jnp.flip(arr, axis=axis)
+    return jnp.flip(_ffill_array(flipped, axis=axis), axis=axis)
+
+
+def _interpolate_array(arr, axis: int = 0):
+    """Linear interpolation of interior NaNs along axis; trailing NaNs are
+    forward-filled, leading NaNs kept (pandas .interpolate() default).
+    JIT-compatible and differentiable."""
+    isnan = jnp.isnan(arr)
+    n = arr.shape[axis]
+    shape = [1] * arr.ndim
+    shape[axis] = n
+    idx = jnp.broadcast_to(jnp.arange(n).reshape(shape), arr.shape)
+    prev_idx = jax.lax.cummax(jnp.where(isnan, -1, idx), axis=axis)
+    next_rev = jax.lax.cummax(jnp.flip(jnp.where(isnan, -1, n - 1 - idx), axis=axis), axis=axis)
+    next_idx = jnp.flip(next_rev, axis=axis)
+    has_prev = prev_idx >= 0
+    has_next = next_idx >= 0
+    next_pos = jnp.where(has_next, n - 1 - next_idx, 0)
+    prev_pos = jnp.maximum(prev_idx, 0)
+    prev_val = jnp.take_along_axis(arr, prev_pos, axis=axis)
+    next_val = jnp.take_along_axis(arr, next_pos, axis=axis)
+    span = jnp.maximum(next_pos - prev_pos, 1)
+    frac = (idx - prev_pos) / span
+    interp = prev_val + (next_val - prev_val) * frac
+    # interior NaN: interpolate; trailing NaN (no next): hold prev; leading NaN: keep NaN
+    filled = jnp.where(has_next, interp, prev_val)
+    filled = jnp.where(has_prev, filled, jnp.nan)
+    return jnp.where(isnan, filled, arr)
+
+
+def _rank_1d(x, method: str = "average", ascending: bool = True):
+    """Rank a 1D array, pandas semantics (NaNs get NaN rank).
+
+    JIT-compatible: uses sort + searchsorted, no dynamic shapes.
+    """
+    v = x if ascending else -x
+    isnan = jnp.isnan(v)
+    sorted_v = jnp.sort(v)  # NaNs sort to the end
+    rank_min = jnp.searchsorted(sorted_v, v, side="left") + 1
+    rank_max = jnp.searchsorted(sorted_v, v, side="right")
+    if method == "average":
+        ranks = (rank_min + rank_max) / 2.0
+    elif method == "min":
+        ranks = rank_min.astype(jnp.float32)
+    elif method == "max":
+        ranks = rank_max.astype(jnp.float32)
+    elif method == "dense":
+        boundary = jnp.concatenate(
+            [jnp.ones(1, dtype=jnp.int32), (sorted_v[1:] != sorted_v[:-1]).astype(jnp.int32)]
+        )
+        dense_sorted = jnp.cumsum(boundary)
+        pos = jnp.searchsorted(sorted_v, v, side="left")
+        ranks = dense_sorted[pos].astype(jnp.float32)
+    elif method in ("first", "ordinal"):
+        order = jnp.argsort(v, stable=True)
+        ranks = (
+            jnp.zeros(v.shape[0], dtype=jnp.float32)
+            .at[order]
+            .set(jnp.arange(1, v.shape[0] + 1, dtype=jnp.float32))
+        )
+    else:
+        raise ValueError(f"unsupported rank method: {method}")
+    return jnp.where(isnan, jnp.nan, ranks.astype(jnp.float32))
+
+
+def _nan_pearson(x, y):
+    """Pearson correlation over pairwise-complete observations. JIT-compatible."""
+    valid = ~(jnp.isnan(x) | jnp.isnan(y))
+    n = jnp.sum(valid)
+    xv = jnp.where(valid, x, 0.0)
+    yv = jnp.where(valid, y, 0.0)
+    mx = jnp.sum(xv) / n
+    my = jnp.sum(yv) / n
+    dx = jnp.where(valid, x - mx, 0.0)
+    dy = jnp.where(valid, y - my, 0.0)
+    cov = jnp.sum(dx * dy)
+    sx = jnp.sqrt(jnp.sum(dx * dx))
+    sy = jnp.sqrt(jnp.sum(dy * dy))
+    return cov / (sx * sy)
+
+
+def _nan_cov(x, y, ddof: int = 1):
+    """Covariance over pairwise-complete observations. JIT-compatible."""
+    valid = ~(jnp.isnan(x) | jnp.isnan(y))
+    n = jnp.sum(valid)
+    xv = jnp.where(valid, x, 0.0)
+    yv = jnp.where(valid, y, 0.0)
+    mx = jnp.sum(xv) / n
+    my = jnp.sum(yv) / n
+    dx = jnp.where(valid, x - mx, 0.0)
+    dy = jnp.where(valid, y - my, 0.0)
+    return jnp.sum(dx * dy) / (n - ddof)
+
+
+def _cummax_pandas(arr, axis: int = 0):
+    """Cumulative max, pandas NaN semantics (NaN stays NaN, max carries through)."""
+    isnan = jnp.isnan(arr)
+    filled = jnp.where(isnan, -jnp.inf, arr)
+    cm = jax.lax.cummax(filled, axis=axis)
+    return jnp.where(isnan, jnp.nan, cm)
+
+
+def _cummin_pandas(arr, axis: int = 0):
+    """Cumulative min, pandas NaN semantics."""
+    isnan = jnp.isnan(arr)
+    filled = jnp.where(isnan, jnp.inf, arr)
+    cm = jax.lax.cummin(filled, axis=axis)
+    return jnp.where(isnan, jnp.nan, cm)
+
+
 @dataclass
 class Series:
     """
@@ -2933,7 +3084,7 @@ class Series:
     def __init__(self, data, index=None, name=None):
         """Create a Series from array-like data."""
         # Convert to array, keeping as numpy for non-numeric types
-        if isinstance(data, (list, np.ndarray)):
+        if isinstance(data, list | np.ndarray):
             arr = np.asarray(data)
             # Only convert to JAX if numeric
             if np.issubdtype(arr.dtype, np.number):
@@ -2970,13 +3121,13 @@ class Series:
         """Return series index."""
         return self._index
 
-    def sum(self):
-        """Sum of all values (JIT-compatible)."""
-        return jnp.sum(self._data)
+    def sum(self, axis=0, skipna=True):
+        """Sum of all values, NaN-aware (JIT-compatible)."""
+        return jnp.nansum(self._data) if skipna else jnp.sum(self._data)
 
-    def mean(self):
-        """Mean of all values (JIT-compatible)."""
-        return jnp.mean(self._data)
+    def mean(self, axis=0, skipna=True):
+        """Mean of all values, NaN-aware (JIT-compatible)."""
+        return jnp.nanmean(self._data) if skipna else jnp.mean(self._data)
 
     def abs(self):
         """Absolute value."""
@@ -3049,6 +3200,555 @@ class Series:
             counts = counts[order]
         return Series(counts, index=np.asarray(unique_vals), name=self._name)
 
+    # ============================
+    # Internal helpers
+    # ============================
+
+    def _new(self, data, index=None, name=_MISSING):
+        """Build a Series preserving index/name unless overridden."""
+        return Series(
+            data,
+            index=self._index if index is None else index,
+            name=self._name if name is _MISSING else name,
+        )
+
+    # ============================
+    # Properties (pandas parity)
+    # ============================
+
+    @name.setter
+    def name(self, value):
+        self._name = value
+
+    @property
+    def shape(self):
+        return (len(self._data),)
+
+    @property
+    def size(self) -> int:
+        return len(self._data)
+
+    @property
+    def ndim(self) -> int:
+        return 1
+
+    @property
+    def dtype(self):
+        return self._data.dtype
+
+    @property
+    def dtypes(self):
+        return self._data.dtype
+
+    @property
+    def empty(self) -> bool:
+        return len(self._data) == 0
+
+    @property
+    def T(self):
+        return self
+
+    def transpose(self):
+        """Return self — a Series is 1D (JIT-compatible)."""
+        return self
+
+    @property
+    def axes(self):
+        return [self._index]
+
+    @property
+    def array(self):
+        return self._data
+
+    @property
+    def nbytes(self) -> int:
+        return np.asarray(self._data).nbytes
+
+    @property
+    def hasnans(self) -> bool:
+        if not jnp.issubdtype(self._data.dtype, jnp.floating):
+            return False
+        return bool(jnp.any(jnp.isnan(self._data)))
+
+    @property
+    def is_unique(self) -> bool:
+        arr = np.asarray(self._data)
+        return len(np.unique(arr)) == len(arr)
+
+    @property
+    def is_monotonic_increasing(self) -> bool:
+        arr = self._data
+        if len(arr) <= 1:
+            return True
+        return bool(jnp.all(arr[1:] >= arr[:-1]))
+
+    @property
+    def is_monotonic_decreasing(self) -> bool:
+        arr = self._data
+        if len(arr) <= 1:
+            return True
+        return bool(jnp.all(arr[1:] <= arr[:-1]))
+
+    @property
+    def attrs(self) -> dict:
+        if not hasattr(self, "_attrs"):
+            self._attrs = {}
+        return self._attrs
+
+    @attrs.setter
+    def attrs(self, value):
+        self._attrs = dict(value)
+
+    @property
+    def flags(self):
+        return _Flags()
+
+    def set_flags(self, **kwargs):
+        """Return a copy (flags are not used by jaxframe)."""
+        return self.copy()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __iter__(self):
+        return iter(np.asarray(self._data).tolist())
+
+    def __getitem__(self, key):
+        if isinstance(key, Series):
+            key = np.asarray(key._data)
+        if isinstance(key, np.ndarray | jnp.ndarray) and key.dtype == bool:
+            mask = np.asarray(key)
+            return Series(self._data[jnp.asarray(mask)], index=self._index[mask], name=self._name)
+        if isinstance(key, slice):
+            return Series(self._data[key], index=self._index[key], name=self._name)
+        if isinstance(key, list | np.ndarray | jnp.ndarray):
+            idx = jnp.asarray(key)
+            return Series(
+                jnp.take(self._data, idx, axis=0),
+                index=self._index[np.asarray(key)],
+                name=self._name,
+            )
+        # Label lookup first; fall back to positional for default integer index
+        matches = np.flatnonzero(self._index == key)
+        if len(matches) == 1:
+            return self._data[int(matches[0])]
+        if isinstance(key, int | np.integer):
+            return self._data[int(key)]
+        raise KeyError(key)
+
+    @property
+    def iloc(self):
+        return _SeriesILocIndexer(self)
+
+    @property
+    def loc(self):
+        return _SeriesLocIndexer(self)
+
+    @property
+    def at(self):
+        return _SeriesLocIndexer(self)
+
+    @property
+    def iat(self):
+        return _SeriesILocIndexer(self)
+
+    def keys(self):
+        return self._index
+
+    def items(self):
+        vals = np.asarray(self._data).tolist()
+        return zip(self._index.tolist(), vals)
+
+    def item(self):
+        if len(self._data) != 1:
+            raise ValueError("can only convert an array of size 1 to a Python scalar")
+        return np.asarray(self._data).item()
+
+    # ============================
+    # Reductions (NaN-aware, JIT-compatible)
+    # ============================
+
+    def min(self, axis=0, skipna=True):
+        """Minimum (JIT-compatible)."""
+        return jnp.nanmin(self._data) if skipna else jnp.min(self._data)
+
+    def max(self, axis=0, skipna=True):
+        """Maximum (JIT-compatible)."""
+        return jnp.nanmax(self._data) if skipna else jnp.max(self._data)
+
+    def prod(self, axis=0, skipna=True):
+        """Product (JIT-compatible, differentiable)."""
+        return jnp.nanprod(self._data) if skipna else jnp.prod(self._data)
+
+    product = prod
+
+    def std(self, axis=0, ddof: int = 1, skipna=True):
+        """Standard deviation (JIT-compatible, differentiable)."""
+        return jnp.nanstd(self._data, ddof=ddof)
+
+    def var(self, axis=0, ddof: int = 1, skipna=True):
+        """Variance (JIT-compatible, differentiable)."""
+        return jnp.nanvar(self._data, ddof=ddof)
+
+    def sem(self, axis=0, ddof: int = 1):
+        """Standard error of the mean (JIT-compatible, differentiable)."""
+        n = jnp.sum(~jnp.isnan(self._data))
+        return jnp.nanstd(self._data, ddof=ddof) / jnp.sqrt(n)
+
+    def median(self, axis=0, skipna=True):
+        """Median (JIT-compatible)."""
+        return jnp.nanmedian(self._data)
+
+    def quantile(self, q=0.5):
+        """Quantile(s) (JIT-compatible). Scalar q -> scalar, list q -> Series."""
+        if isinstance(q, list | tuple | np.ndarray):
+            vals = jnp.nanquantile(self._data, jnp.asarray(q))
+            return Series(vals, index=np.asarray(q), name=self._name)
+        return jnp.nanquantile(self._data, q)
+
+    def count(self):
+        """Number of non-NaN observations (JIT-compatible)."""
+        if not jnp.issubdtype(self._data.dtype, jnp.floating):
+            return len(self._data)
+        return jnp.sum(~jnp.isnan(self._data))
+
+    def nunique(self, dropna=True) -> int:
+        """Number of unique values. Eager (structure discovery)."""
+        arr = np.asarray(self._data)
+        if dropna and np.issubdtype(arr.dtype, np.floating):
+            arr = arr[~np.isnan(arr)]
+        return len(np.unique(arr))
+
+    def all(self, axis=0):
+        """Whether all elements are truthy (JIT-compatible, boolean output)."""
+        return jnp.all(self._data != 0)
+
+    def any(self, axis=0):
+        """Whether any element is truthy (JIT-compatible, boolean output)."""
+        return jnp.any(self._data != 0)
+
+    def skew(self, axis=0):
+        """Bias-corrected skewness, pandas semantics (JIT-compatible, differentiable)."""
+        data = self._data
+        n = jnp.sum(~jnp.isnan(data))
+        mean = jnp.nanmean(data)
+        m2 = jnp.nansum((data - mean) ** 2)
+        m3 = jnp.nansum((data - mean) ** 3)
+        s2 = m2 / (n - 1)
+        return (m3 / n) / (s2**1.5) * (n**2) / ((n - 1) * (n - 2))
+
+    def kurt(self, axis=0):
+        """Bias-corrected excess kurtosis, pandas semantics (JIT-compatible)."""
+        data = self._data
+        n = jnp.sum(~jnp.isnan(data))
+        mean = jnp.nanmean(data)
+        m2 = jnp.nansum((data - mean) ** 2)
+        m4 = jnp.nansum((data - mean) ** 4)
+        s2 = m2 / (n - 1)
+        adj = (n * (n + 1)) / ((n - 1) * (n - 2) * (n - 3))
+        return adj * (m4 / (s2**2)) - 3.0 * (n - 1) ** 2 / ((n - 2) * (n - 3))
+
+    kurtosis = kurt
+
+    def mode(self):
+        """All modal values, ascending (eager unique)."""
+        arr = np.asarray(self._data)
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = arr[~np.isnan(arr)]
+        vals, counts = np.unique(arr, return_counts=True)
+        modes = np.sort(vals[counts == counts.max()])
+        return Series(modes, index=np.arange(len(modes)), name=self._name)
+
+    def argmin(self, axis=0, skipna=True):
+        """Position of minimum (JIT-compatible, discrete output)."""
+        return jnp.nanargmin(self._data)
+
+    def argmax(self, axis=0, skipna=True):
+        """Position of maximum (JIT-compatible, discrete output)."""
+        return jnp.nanargmax(self._data)
+
+    def idxmin(self, axis=0, skipna=True):
+        """Index label of minimum. Eager label lookup."""
+        return self._index[int(jnp.nanargmin(self._data))]
+
+    def idxmax(self, axis=0, skipna=True):
+        """Index label of maximum. Eager label lookup."""
+        return self._index[int(jnp.nanargmax(self._data))]
+
+    def argsort(self, ascending=True):
+        """Positions that would sort the Series (JIT-compatible, discrete)."""
+        order = jnp.argsort(self._data if ascending else -self._data, stable=True)
+        return self._new(order)
+
+    def autocorr(self, lag: int = 1):
+        """Lag-N autocorrelation, pairwise-complete (JIT-compatible for static lag)."""
+        x = self._data[:-lag] if lag > 0 else self._data
+        y = self._data[lag:] if lag > 0 else self._data
+        return _nan_pearson(x, y)
+
+    def corr(self, other, method="pearson"):
+        """Pearson correlation with another Series (JIT-compatible)."""
+        if method != "pearson":
+            raise NotImplementedError(f"corr method {method!r} not supported")
+        other_data = other._data if isinstance(other, Series) else jnp.asarray(other)
+        return _nan_pearson(self._data, other_data)
+
+    def cov(self, other, ddof: int = 1):
+        """Covariance with another Series (JIT-compatible, differentiable)."""
+        other_data = other._data if isinstance(other, Series) else jnp.asarray(other)
+        return _nan_cov(self._data, other_data, ddof=ddof)
+
+    def dot(self, other):
+        """Dot product (JIT-compatible, differentiable)."""
+        other_data = other._data if isinstance(other, Series) else jnp.asarray(other)
+        return jnp.dot(self._data, other_data)
+
+    def __matmul__(self, other):
+        return self.dot(other)
+
+    def describe(self):
+        """Summary statistics (eager assembly of JIT-computed stats)."""
+        d = self._data
+        stats = [
+            jnp.sum(~jnp.isnan(d)),
+            jnp.nanmean(d),
+            jnp.nanstd(d, ddof=1),
+            jnp.nanmin(d),
+            jnp.nanquantile(d, 0.25),
+            jnp.nanquantile(d, 0.5),
+            jnp.nanquantile(d, 0.75),
+            jnp.nanmax(d),
+        ]
+        labels = np.array(["count", "mean", "std", "min", "25%", "50%", "75%", "max"])
+        return Series(
+            jnp.stack([jnp.asarray(s, dtype=jnp.float32) for s in stats]),
+            index=labels,
+            name=self._name,
+        )
+
+    # ============================
+    # Cumulative ops (JIT-compatible)
+    # ============================
+
+    def cumsum(self, axis=0, skipna=True):
+        """Cumulative sum, NaN-aware (JIT-compatible, differentiable)."""
+        d = self._data
+        if jnp.issubdtype(d.dtype, jnp.floating):
+            isnan = jnp.isnan(d)
+            out = jnp.cumsum(jnp.where(isnan, 0.0, d))
+            return self._new(jnp.where(isnan, jnp.nan, out))
+        return self._new(jnp.cumsum(d))
+
+    def cumprod(self, axis=0, skipna=True):
+        """Cumulative product, NaN-aware (JIT-compatible, differentiable)."""
+        d = self._data
+        if jnp.issubdtype(d.dtype, jnp.floating):
+            isnan = jnp.isnan(d)
+            out = jnp.cumprod(jnp.where(isnan, 1.0, d))
+            return self._new(jnp.where(isnan, jnp.nan, out))
+        return self._new(jnp.cumprod(d))
+
+    def cummax(self, axis=0, skipna=True):
+        """Cumulative max, NaN-aware (JIT-compatible)."""
+        if jnp.issubdtype(self._data.dtype, jnp.floating):
+            return self._new(_cummax_pandas(self._data))
+        return self._new(jax.lax.cummax(self._data, axis=0))
+
+    def cummin(self, axis=0, skipna=True):
+        """Cumulative min, NaN-aware (JIT-compatible)."""
+        if jnp.issubdtype(self._data.dtype, jnp.floating):
+            return self._new(_cummin_pandas(self._data))
+        return self._new(jax.lax.cummin(self._data, axis=0))
+
+    # ============================
+    # Elementwise ops (JIT-compatible)
+    # ============================
+
+    def round(self, decimals: int = 0):
+        """Round to given decimals (JIT-compatible)."""
+        return self._new(jnp.round(self._data, decimals))
+
+    def clip(self, lower=None, upper=None):
+        """Clip values (JIT-compatible, differentiable)."""
+        return self._new(jnp.clip(self._data, lower, upper))
+
+    def isna(self):
+        """Boolean mask of NaNs (JIT-compatible)."""
+        if not jnp.issubdtype(self._data.dtype, jnp.floating):
+            return self._new(jnp.zeros(len(self._data), dtype=bool))
+        return self._new(jnp.isnan(self._data))
+
+    isnull = isna
+
+    def notna(self):
+        """Boolean mask of non-NaNs (JIT-compatible)."""
+        return self._new(~self.isna()._data)
+
+    notnull = notna
+
+    def fillna(self, value):
+        """Fill NaNs with a scalar or aligned Series (JIT-compatible)."""
+        fill = value._data if isinstance(value, Series) else value
+        return self._new(jnp.where(jnp.isnan(self._data), fill, self._data))
+
+    def ffill(self, axis=0):
+        """Forward-fill NaNs (JIT-compatible, differentiable)."""
+        return self._new(_ffill_array(self._data))
+
+    pad = ffill
+
+    def bfill(self, axis=0):
+        """Backward-fill NaNs (JIT-compatible, differentiable)."""
+        return self._new(_bfill_array(self._data))
+
+    backfill = bfill
+
+    def interpolate(self, method="linear"):
+        """Linear interpolation of NaNs (JIT-compatible, differentiable)."""
+        if method != "linear":
+            raise NotImplementedError(f"interpolate method {method!r} not supported")
+        return self._new(_interpolate_array(self._data))
+
+    def where(self, cond, other=jnp.nan):
+        """Keep values where cond is True, else other (JIT-compatible)."""
+        if callable(cond):
+            cond = cond(self)
+        cond_data = cond._data if isinstance(cond, Series) else jnp.asarray(cond)
+        other_data = other._data if isinstance(other, Series) else other
+        return self._new(jnp.where(cond_data, self._data, other_data))
+
+    def mask(self, cond, other=jnp.nan):
+        """Replace values where cond is True (JIT-compatible)."""
+        if callable(cond):
+            cond = cond(self)
+        cond_data = cond._data if isinstance(cond, Series) else jnp.asarray(cond)
+        other_data = other._data if isinstance(other, Series) else other
+        return self._new(jnp.where(cond_data, other_data, self._data))
+
+    def case_when(self, caselist):
+        """Replace values where each condition is True; first match wins
+        (JIT-compatible)."""
+        out = self._data
+        for cond, repl in reversed(caselist):
+            if callable(cond):
+                cond = cond(self)
+            cond_data = cond._data if isinstance(cond, Series) else jnp.asarray(cond)
+            repl_data = repl._data if isinstance(repl, Series) else repl
+            out = jnp.where(cond_data, repl_data, out)
+        return self._new(out)
+
+    def isin(self, values):
+        """Boolean mask of membership (JIT-compatible, boolean output)."""
+        vals = jnp.asarray(values._data if isinstance(values, Series) else np.asarray(list(values)))
+        return self._new(jnp.isin(self._data, vals))
+
+    def astype(self, dtype):
+        """Cast to dtype (JIT-compatible)."""
+        return self._new(self._data.astype(dtype))
+
+    def copy(self, deep=True):
+        """Copy (JAX arrays are immutable; shares data)."""
+        return self._new(self._data)
+
+    def convert_dtypes(self):
+        """No-op copy (jaxframe already uses concrete dtypes)."""
+        return self.copy()
+
+    def infer_objects(self):
+        """No-op copy (jaxframe already uses concrete dtypes)."""
+        return self.copy()
+
+    # ============================
+    # Named arithmetic / comparison (pandas parity)
+    # ============================
+
+    def add(self, other, fill_value=None):
+        """Elementwise addition (JIT-compatible, differentiable)."""
+        return self._binop_filled(other, jnp.add, fill_value)
+
+    radd = add
+
+    def sub(self, other, fill_value=None):
+        """Elementwise subtraction (JIT-compatible, differentiable)."""
+        return self._binop_filled(other, jnp.subtract, fill_value)
+
+    subtract = sub
+
+    def rsub(self, other, fill_value=None):
+        return self._binop_filled(other, lambda a, b: b - a, fill_value)
+
+    def mul(self, other, fill_value=None):
+        """Elementwise multiplication (JIT-compatible, differentiable)."""
+        return self._binop_filled(other, jnp.multiply, fill_value)
+
+    multiply = mul
+    rmul = mul
+
+    def div(self, other, fill_value=None):
+        """Elementwise division (JIT-compatible, differentiable)."""
+        return self._binop_filled(other, jnp.true_divide, fill_value)
+
+    divide = div
+    truediv = div
+
+    def rdiv(self, other, fill_value=None):
+        return self._binop_filled(other, lambda a, b: b / a, fill_value)
+
+    rtruediv = rdiv
+
+    def floordiv(self, other, fill_value=None):
+        return self._binop_filled(other, jnp.floor_divide, fill_value)
+
+    def rfloordiv(self, other, fill_value=None):
+        return self._binop_filled(other, lambda a, b: b // a, fill_value)
+
+    def mod(self, other, fill_value=None):
+        return self._binop_filled(other, jnp.mod, fill_value)
+
+    def rmod(self, other, fill_value=None):
+        return self._binop_filled(other, lambda a, b: b % a, fill_value)
+
+    def pow(self, other, fill_value=None):
+        return self._binop_filled(other, jnp.power, fill_value)
+
+    def rpow(self, other, fill_value=None):
+        return self._binop_filled(other, lambda a, b: b**a, fill_value)
+
+    def divmod(self, other):
+        """Return (floordiv, mod) pair of Series (JIT-compatible)."""
+        return self.floordiv(other), self.mod(other)
+
+    def rdivmod(self, other):
+        return self.rfloordiv(other), self.rmod(other)
+
+    def _binop_filled(self, other, op, fill_value):
+        a = self._data
+        b = other._data if isinstance(other, Series) else other
+        if fill_value is not None:
+            a = jnp.where(jnp.isnan(a), fill_value, a)
+            if isinstance(b, jnp.ndarray | np.ndarray):
+                b = jnp.where(jnp.isnan(b), fill_value, b)
+        return self._new(op(a, b))
+
+    def eq(self, other):
+        """Elementwise equality (JIT-compatible, boolean output)."""
+        return self._binop(other, jnp.equal)
+
+    def ne(self, other):
+        return self._binop(other, jnp.not_equal)
+
+    def lt(self, other):
+        return self._binop(other, jnp.less)
+
+    def le(self, other):
+        return self._binop(other, jnp.less_equal)
+
+    def gt(self, other):
+        return self._binop(other, jnp.greater)
+
+    def ge(self, other):
+        return self._binop(other, jnp.greater_equal)
+
     # Arithmetic operators
     def _binop(self, other, op):
         other_data = other._data if isinstance(other, Series) else other
@@ -3119,6 +3819,511 @@ class Series:
     def __ne__(self, other):
         return self._binop(other, jnp.not_equal)
 
+    # ============================
+    # Selection / reshaping
+    # ============================
+
+    def head(self, n: int = 5):
+        """First n rows (JIT-compatible for static n)."""
+        return Series(self._data[:n], index=self._index[:n], name=self._name)
+
+    def tail(self, n: int = 5):
+        """Last n rows (JIT-compatible for static n)."""
+        if n == 0:
+            return Series(self._data[:0], index=self._index[:0], name=self._name)
+        return Series(self._data[-n:], index=self._index[-n:], name=self._name)
+
+    def take(self, indices, axis=0):
+        """Gather by integer position (JIT-compatible, grad flows through gather)."""
+        idx = jnp.asarray(indices)
+        new_index = self._index[np.asarray(indices)] if not _is_tracer(idx) else self._index
+        return Series(jnp.take(self._data, idx, axis=0), index=new_index, name=self._name)
+
+    def repeat(self, repeats, axis=None):
+        """Repeat each element (JIT-compatible for static scalar repeats)."""
+        return Series(
+            jnp.repeat(self._data, repeats),
+            index=np.repeat(self._index, repeats),
+            name=self._name,
+        )
+
+    def drop(self, labels=None, index=None):
+        """Drop by index label. Eager (shape change)."""
+        labels = labels if labels is not None else index
+        if not isinstance(labels, list | np.ndarray | tuple):
+            labels = [labels]
+        mask = ~np.isin(self._index, np.asarray(labels))
+        return Series(self._data[jnp.asarray(mask)], index=self._index[mask], name=self._name)
+
+    def dropna(self):
+        """Drop NaN entries. Eager (shape change)."""
+        mask = ~np.isnan(np.asarray(self._data))
+        return Series(self._data[jnp.asarray(mask)], index=self._index[mask], name=self._name)
+
+    def get(self, key, default=None):
+        """Value at index label, or default (eager label lookup)."""
+        matches = np.flatnonzero(self._index == key)
+        if len(matches) == 0:
+            return default
+        return self._data[int(matches[0])]
+
+    def xs(self, key, axis=0):
+        """Value at index label (eager label lookup)."""
+        return self[key]
+
+    def pop(self, item):
+        """Remove label and return its value. Eager, mutates self."""
+        value = self[item]
+        mask = self._index != item
+        self._data = self._data[jnp.asarray(mask)]
+        self._index = self._index[mask]
+        return value
+
+    def filter(self, items=None, like=None, regex=None):
+        """Filter by index label. Eager."""
+        idx = self._index
+        if items is not None:
+            mask = np.isin(idx, np.asarray(items))
+        elif like is not None:
+            mask = np.array([like in str(label) for label in idx])
+        elif regex is not None:
+            import re
+
+            pat = re.compile(regex)
+            mask = np.array([bool(pat.search(str(label))) for label in idx])
+        else:
+            raise TypeError("Must pass either items, like, or regex")
+        return Series(self._data[jnp.asarray(mask)], index=idx[mask], name=self._name)
+
+    def truncate(self, before=None, after=None):
+        """Keep rows with label in [before, after]. Eager."""
+        mask = np.ones(len(self._index), dtype=bool)
+        if before is not None:
+            mask &= self._index >= before
+        if after is not None:
+            mask &= self._index <= after
+        return Series(self._data[jnp.asarray(mask)], index=self._index[mask], name=self._name)
+
+    def squeeze(self, axis=None):
+        """Scalar if length 1, else self (JIT-compatible)."""
+        if len(self._data) == 1:
+            return self._data[0]
+        return self
+
+    def explode(self, ignore_index=False):
+        """Flatten list-like elements. Eager (object data)."""
+        arr = np.asarray(self._data, dtype=object)
+        out_vals, out_idx = [], []
+        for label, v in zip(self._index, arr):
+            if isinstance(v, list | tuple | np.ndarray) and len(v) > 0:
+                out_vals.extend(v)
+                out_idx.extend([label] * len(v))
+            else:
+                out_vals.append(np.nan if isinstance(v, list | tuple) else v)
+                out_idx.append(label)
+        index = np.arange(len(out_vals)) if ignore_index else np.asarray(out_idx)
+        return Series(np.asarray(out_vals), index=index, name=self._name)
+
+    def sample(self, n=None, frac=None, replace=False, random_state=None):
+        """Random sample. Eager, not differentiable."""
+        rng = np.random.default_rng(random_state)
+        if n is None:
+            n = int(round((frac if frac is not None else 1.0) * len(self._data)))
+        pos = rng.choice(len(self._data), size=n, replace=replace)
+        return Series(
+            jnp.take(self._data, jnp.asarray(pos), axis=0),
+            index=self._index[pos],
+            name=self._name,
+        )
+
+    def reindex(self, index=None, fill_value=jnp.nan):
+        """Conform to new index labels; missing labels get fill_value. Eager."""
+        new_index = np.asarray(index)
+        lookup = {label: i for i, label in enumerate(self._index.tolist())}
+        pos = np.array([lookup.get(label, -1) for label in new_index.tolist()])
+        gathered = jnp.take(self._data, jnp.asarray(np.maximum(pos, 0)), axis=0)
+        data = jnp.where(jnp.asarray(pos) < 0, fill_value, gathered)
+        return Series(data, index=new_index, name=self._name)
+
+    def reindex_like(self, other, fill_value=jnp.nan):
+        """Conform to another Series' index. Eager."""
+        return self.reindex(index=other._index, fill_value=fill_value)
+
+    def rename(self, index=None, **kwargs):
+        """Rename the Series (scalar) or transform index labels (dict/callable)."""
+        if callable(index):
+            return Series(
+                self._data, index=np.asarray([index(i) for i in self._index]), name=self._name
+            )
+        if isinstance(index, dict):
+            return Series(
+                self._data,
+                index=np.asarray([index.get(i, i) for i in self._index.tolist()]),
+                name=self._name,
+            )
+        return Series(self._data, index=self._index, name=index)
+
+    def rename_axis(self, mapper=None, **kwargs):
+        """No-op copy (index names are not tracked)."""
+        return self.copy()
+
+    def set_axis(self, labels, axis=0):
+        """Replace the index (JIT-compatible)."""
+        return Series(self._data, index=np.asarray(labels), name=self._name)
+
+    def reset_index(self, drop=False, name=None):
+        """Reset index to a default RangeIndex."""
+        new_index = np.arange(len(self._data))
+        if drop:
+            return Series(self._data, index=new_index, name=self._name)
+        return DataFrame(
+            {"index": self._index, self._name or (name or 0): self._data},
+            index=new_index,
+        )
+
+    def asof(self, where):
+        """Last non-NaN value with index label <= where. Eager."""
+        mask = (self._index <= where) & ~np.isnan(np.asarray(self._data))
+        pos = np.flatnonzero(mask)
+        if len(pos) == 0:
+            return jnp.nan
+        return self._data[int(pos[-1])]
+
+    def first_valid_index(self):
+        """Label of first non-NaN entry, or None. Eager."""
+        valid = np.flatnonzero(~np.isnan(np.asarray(self._data)))
+        return self._index[valid[0]] if len(valid) else None
+
+    def last_valid_index(self):
+        """Label of last non-NaN entry, or None. Eager."""
+        valid = np.flatnonzero(~np.isnan(np.asarray(self._data)))
+        return self._index[valid[-1]] if len(valid) else None
+
+    # ============================
+    # Sorting / ranking / uniqueness
+    # ============================
+
+    def sort_values(self, ascending=True, na_position="last"):
+        """Sort by values. JIT-compatible (jnp.argsort + gather); index follows
+        the sort when eager, stays put under a trace (static aux data)."""
+        order = jnp.argsort(self._data if ascending else -self._data, stable=True)
+        data = jnp.take(self._data, order, axis=0)
+        index = self._index if _is_tracer(order) else self._index[np.asarray(order)]
+        return Series(data, index=index, name=self._name)
+
+    def sort_index(self, ascending=True):
+        """Sort by index labels. Structure discovery is eager; gather is JIT."""
+        order = np.argsort(self._index)
+        if not ascending:
+            order = order[::-1]
+        return Series(
+            jnp.take(self._data, jnp.asarray(order), axis=0),
+            index=self._index[order],
+            name=self._name,
+        )
+
+    def rank(self, method="average", ascending=True):
+        """Rank values, pandas semantics (JIT-compatible)."""
+        return self._new(_rank_1d(self._data, method=method, ascending=ascending))
+
+    def nlargest(self, n: int = 5):
+        """Top n values, descending. JIT-compatible via lax.top_k (static n)."""
+        key = jnp.where(jnp.isnan(self._data), -jnp.inf, self._data)
+        _, pos = jax.lax.top_k(key, n)
+        values = jnp.take(self._data, pos)
+        index = self._index if _is_tracer(pos) else self._index[np.asarray(pos)]
+        return Series(values, index=index, name=self._name)
+
+    def nsmallest(self, n: int = 5):
+        """Bottom n values, ascending. JIT-compatible via lax.top_k (static n)."""
+        key = jnp.where(jnp.isnan(self._data), -jnp.inf, -self._data)
+        _, pos = jax.lax.top_k(key, n)
+        values = jnp.take(self._data, pos)
+        index = self._index if _is_tracer(pos) else self._index[np.asarray(pos)]
+        return Series(values, index=index, name=self._name)
+
+    def unique(self):
+        """Unique values in order of appearance. Eager (structure discovery)."""
+        arr = np.asarray(self._data)
+        _, first_pos = np.unique(arr, return_index=True)
+        return jnp.asarray(arr[np.sort(first_pos)])
+
+    def duplicated(self, keep="first"):
+        """Boolean mask of duplicate values. Eager (structure discovery)."""
+        arr = np.asarray(self._data)
+        n = len(arr)
+        u, first_pos, inv, counts = np.unique(
+            arr, return_index=True, return_inverse=True, return_counts=True
+        )
+        if keep == "first":
+            mask = first_pos[inv] != np.arange(n)
+        elif keep == "last":
+            rev = arr[::-1]
+            _, first_pos_r, inv_r = np.unique(rev, return_index=True, return_inverse=True)[:3]
+            mask = (first_pos_r[inv_r] != np.arange(n))[::-1]
+        else:  # keep=False
+            mask = counts[inv] > 1
+        return self._new(jnp.asarray(mask))
+
+    def drop_duplicates(self, keep="first"):
+        """Drop duplicate values. Eager (shape change)."""
+        mask = ~np.asarray(self.duplicated(keep=keep)._data)
+        return Series(self._data[jnp.asarray(mask)], index=self._index[mask], name=self._name)
+
+    def factorize(self, sort=False):
+        """Encode values as (codes, uniques) in appearance order; NaN gets
+        code -1 (pandas semantics). Eager."""
+        arr = np.asarray(self._data)
+        nan_mask = (
+            np.isnan(arr) if np.issubdtype(arr.dtype, np.floating) else np.zeros(len(arr), bool)
+        )
+        valid = arr[~nan_mask]
+        uniques, first_pos, inv = np.unique(valid, return_index=True, return_inverse=True)
+        if not sort:
+            order = np.argsort(first_pos)
+            remap = np.empty_like(order)
+            remap[order] = np.arange(len(order))
+            inv = remap[inv]
+            uniques = uniques[order]
+        codes = np.full(len(arr), -1, dtype=np.int64)
+        codes[~nan_mask] = inv
+        return codes, uniques
+
+    def searchsorted(self, value, side="left"):
+        """Positions where value(s) would be inserted (JIT-compatible)."""
+        return jnp.searchsorted(self._data, jnp.asarray(value), side=side)
+
+    # ============================
+    # Function application / grouping / windows
+    # ============================
+
+    def apply(self, func, convert_dtype=True, args=(), **kwargs):
+        """Apply func elementwise. Vectorized (JIT-compatible) when func accepts
+        arrays; falls back to an eager Python loop otherwise."""
+        try:
+            result = func(self._data, *args, **kwargs)
+            if hasattr(result, "shape") and result.shape == self._data.shape:
+                return self._new(result)
+        except Exception:
+            pass
+        out = np.asarray([func(v, *args, **kwargs) for v in np.asarray(self._data)])
+        return self._new(out)
+
+    def agg(self, func=None):
+        """Aggregate by name, callable, or list thereof."""
+        if isinstance(func, str):
+            return getattr(self, func)()
+        if isinstance(func, list | tuple):
+            vals = [self.agg(f) for f in func]
+            labels = [f if isinstance(f, str) else getattr(f, "__name__", str(f)) for f in func]
+            return Series(
+                jnp.stack([jnp.asarray(v, dtype=jnp.float32) for v in vals]),
+                index=np.asarray(labels),
+                name=self._name,
+            )
+        return func(self)
+
+    aggregate = agg
+
+    def transform(self, func):
+        """Apply a shape-preserving function (JIT-compatible if func is)."""
+        if isinstance(func, str):
+            result = getattr(self, func)()
+        else:
+            result = func(self)
+        if isinstance(result, Series):
+            return result
+        return self._new(result)
+
+    def groupby(self, by):
+        """Group by another Series/array. Structure discovery is eager;
+        aggregations are JIT-compatible segment ops."""
+        keys_arr = np.asarray(by._data if isinstance(by, Series) else by)
+        group_keys, segment_ids = np.unique(keys_arr, return_inverse=True)
+        return SeriesGroupBy(
+            data=self._data,
+            segment_ids=jnp.asarray(segment_ids),
+            num_groups=len(group_keys),
+            group_keys=group_keys,
+            name=self._name,
+        )
+
+    def _to_frame_internal(self):
+        col = self._name if isinstance(self._name, str) else "__series__"
+        return DataFrame._from_column_arrays(
+            {col: jnp.asarray(self._data)}, [col], self._index
+        ), col
+
+    def rolling(self, window, min_periods=None):
+        """Rolling window (JIT-compatible aggregations)."""
+        df, col = self._to_frame_internal()
+        return _SeriesWindowProxy(df.rolling(window, min_periods=min_periods), col, self._name)
+
+    def expanding(self, min_periods: int = 1):
+        """Expanding window (JIT-compatible aggregations)."""
+        df, col = self._to_frame_internal()
+        return _SeriesWindowProxy(df.expanding(min_periods=min_periods), col, self._name)
+
+    def ewm(self, alpha=None, span=None, com=None, halflife=None, min_periods: int = 0):
+        """Exponentially weighted window (JIT-compatible aggregations)."""
+        df, col = self._to_frame_internal()
+        return _SeriesWindowProxy(
+            df.ewm(alpha=alpha, span=span, com=com, halflife=halflife, min_periods=min_periods),
+            col,
+            self._name,
+        )
+
+    # ============================
+    # Combining / comparing
+    # ============================
+
+    def combine(self, other, func, fill_value=None):
+        """Combine elementwise with another Series via func (JIT-compatible
+        when func is JAX-compatible)."""
+        other_data = other._data if isinstance(other, Series) else other
+        a, b = self._data, other_data
+        if fill_value is not None:
+            a = jnp.where(jnp.isnan(a), fill_value, a)
+            if isinstance(b, jnp.ndarray | np.ndarray):
+                b = jnp.where(jnp.isnan(b), fill_value, b)
+        return self._new(func(a, b))
+
+    def combine_first(self, other):
+        """Fill NaNs with values from other (JIT-compatible)."""
+        return self._new(jnp.where(jnp.isnan(self._data), other._data, self._data))
+
+    def update(self, other):
+        """Overwrite with non-NaN values from other. Mutates self (eager)."""
+        self._data = jnp.where(jnp.isnan(other._data), self._data, other._data)
+
+    def align(self, other, join="outer", fill_value=jnp.nan):
+        """Align two Series on their index union/intersection. Eager."""
+        if np.array_equal(self._index, other._index):
+            return self.copy(), other.copy()
+        if join == "outer":
+            labels = np.union1d(self._index, other._index)
+        elif join == "inner":
+            labels = np.intersect1d(self._index, other._index)
+        elif join == "left":
+            labels = self._index
+        else:
+            labels = other._index
+        return self.reindex(labels, fill_value=fill_value), other.reindex(
+            labels, fill_value=fill_value
+        )
+
+    def equals(self, other) -> bool:
+        """Exact equality including NaN positions. Eager."""
+        a = np.asarray(self._data)
+        b = np.asarray(other._data if isinstance(other, Series) else other)
+        if a.shape != b.shape or a.dtype.kind != b.dtype.kind:
+            return False
+        try:
+            return bool(np.array_equal(a, b, equal_nan=True))
+        except TypeError:
+            return bool(np.array_equal(a, b))
+
+    def compare(self, other, keep_shape=False):
+        """Rows where self and other differ, as a DataFrame. Eager."""
+        a = np.asarray(self._data)
+        b = np.asarray(other._data)
+        diff = ~((a == b) | (np.isnan(a) & np.isnan(b)))
+        if not keep_shape:
+            pos = np.flatnonzero(diff)
+            return DataFrame({"self": a[pos], "other": b[pos]}, index=self._index[pos])
+        a2, b2 = a.astype(np.float64).copy(), b.astype(np.float64).copy()
+        a2[~diff] = np.nan
+        b2[~diff] = np.nan
+        return DataFrame({"self": a2, "other": b2}, index=self._index)
+
+    # ============================
+    # Conversion / I/O (eager; delegates to pandas where sensible)
+    # ============================
+
+    def to_numpy(self, dtype=None):
+        """Convert to a numpy array (eager)."""
+        arr = np.asarray(self._data)
+        return arr.astype(dtype) if dtype is not None else arr
+
+    def tolist(self):
+        """Convert to a Python list (eager)."""
+        return np.asarray(self._data).tolist()
+
+    to_list = tolist
+
+    def to_dict(self):
+        """Convert to {label: value} dict (eager)."""
+        return dict(zip(self._index.tolist(), np.asarray(self._data).tolist()))
+
+    def to_frame(self, name=None):
+        """Convert to a single-column DataFrame."""
+        col = name if name is not None else (self._name if self._name is not None else 0)
+        return DataFrame({col: np.asarray(self._data)}, index=self._index)
+
+    def to_pandas(self):
+        """Convert to a pandas Series (eager)."""
+        import pandas as pd
+
+        return pd.Series(np.asarray(self._data), index=self._index, name=self._name)
+
+    def memory_usage(self, index=True, deep=False) -> int:
+        """Bytes used by the underlying data (plus index)."""
+        total = np.asarray(self._data).nbytes
+        if index:
+            total += self._index.nbytes
+        return total
+
+    def info(self, **kwargs):
+        """Print a concise summary (delegates to pandas)."""
+        return self.to_pandas().info(**kwargs)
+
+    def _delegate_pandas(self, method, *args, **kwargs):
+        return getattr(self.to_pandas(), method)(*args, **kwargs)
+
+    def to_csv(self, *a, **k):
+        """Write CSV via pandas (eager I/O)."""
+        return self._delegate_pandas("to_csv", *a, **k)
+
+    def to_json(self, *a, **k):
+        """Write JSON via pandas (eager I/O)."""
+        return self._delegate_pandas("to_json", *a, **k)
+
+    def to_string(self, *a, **k):
+        return self._delegate_pandas("to_string", *a, **k)
+
+    def to_markdown(self, *a, **k):
+        return self._delegate_pandas("to_markdown", *a, **k)
+
+    def to_latex(self, *a, **k):
+        return self._delegate_pandas("to_latex", *a, **k)
+
+    def to_excel(self, *a, **k):
+        return self._delegate_pandas("to_excel", *a, **k)
+
+    def to_pickle(self, *a, **k):
+        return self._delegate_pandas("to_pickle", *a, **k)
+
+    def to_sql(self, *a, **k):
+        return self._delegate_pandas("to_sql", *a, **k)
+
+    def to_hdf(self, *a, **k):
+        return self._delegate_pandas("to_hdf", *a, **k)
+
+    def to_clipboard(self, *a, **k):
+        return self._delegate_pandas("to_clipboard", *a, **k)
+
+    def to_xarray(self):
+        return self._delegate_pandas("to_xarray")
+
+    @property
+    def plot(self):
+        """Plotting accessor (delegates to pandas)."""
+        return self.to_pandas().plot
+
+    def hist(self, *a, **k):
+        """Histogram plot (delegates to pandas)."""
+        return self._delegate_pandas("hist", *a, **k)
+
     @property
     def dt(self):
         """Datetime accessor for Series containing datetime64 data."""
@@ -3138,6 +4343,84 @@ class Series:
         if len(self._data) > n_show:
             lines.append("  ...")
         return "\n".join(lines)
+
+
+class _SeriesILocIndexer:
+    """Integer-position indexing for Series."""
+
+    def __init__(self, series: "Series"):
+        self._s = series
+
+    def __getitem__(self, key):
+        if isinstance(key, int | np.integer):
+            return self._s._data[int(key)]
+        if isinstance(key, slice):
+            return Series(self._s._data[key], index=self._s._index[key], name=self._s._name)
+        arr = np.asarray(key)
+        if arr.dtype == bool:
+            return Series(
+                self._s._data[jnp.asarray(arr)], index=self._s._index[arr], name=self._s._name
+            )
+        return Series(
+            jnp.take(self._s._data, jnp.asarray(arr), axis=0),
+            index=self._s._index[arr],
+            name=self._s._name,
+        )
+
+
+class _SeriesLocIndexer:
+    """Label-based indexing for Series."""
+
+    def __init__(self, series: "Series"):
+        self._s = series
+
+    def __getitem__(self, key):
+        s = self._s
+        if isinstance(key, Series):
+            key = np.asarray(key._data)
+        if isinstance(key, np.ndarray | jnp.ndarray) and np.asarray(key).dtype == bool:
+            mask = np.asarray(key)
+            return Series(s._data[jnp.asarray(mask)], index=s._index[mask], name=s._name)
+        if isinstance(key, slice):
+            # label-based inclusive slice
+            start = 0 if key.start is None else int(np.flatnonzero(s._index == key.start)[0])
+            stop = (
+                len(s._index)
+                if key.stop is None
+                else int(np.flatnonzero(s._index == key.stop)[0]) + 1
+            )
+            return Series(s._data[start:stop], index=s._index[start:stop], name=s._name)
+        if isinstance(key, list | np.ndarray):
+            lookup = {label: i for i, label in enumerate(s._index.tolist())}
+            pos = np.array([lookup[k] for k in key])
+            return Series(
+                jnp.take(s._data, jnp.asarray(pos), axis=0), index=s._index[pos], name=s._name
+            )
+        matches = np.flatnonzero(s._index == key)
+        if len(matches) == 0:
+            raise KeyError(key)
+        return s._data[int(matches[0])]
+
+
+class _SeriesWindowProxy:
+    """Wraps a DataFrame window object (Rolling/Expanding/EWM) built from a
+    single-column frame, unwrapping results back to Series."""
+
+    def __init__(self, window_obj, col, name):
+        self._window = window_obj
+        self._col = col
+        self._name = name
+
+    def __getattr__(self, attr):
+        method = getattr(self._window, attr)
+
+        def _call(*args, **kwargs):
+            result_df = method(*args, **kwargs)
+            series = result_df[self._col]
+            series._name = self._name
+            return series
+
+        return _call
 
 
 class _DatetimeAccessor:
@@ -3691,8 +4974,11 @@ def _ewm_mean_block(block, alpha):
 
     def scan_fn(carry, x):
         weighted_sum, total_weight = carry
-        weighted_sum = alpha * x + (1 - alpha) * weighted_sum
-        total_weight = alpha + (1 - alpha) * total_weight
+        valid = ~jnp.isnan(x)
+        xv = jnp.where(valid, x, 0.0)
+        # NaN entries contribute no weight but decay prior weights (pandas ignore_na=False)
+        weighted_sum = jnp.where(valid, alpha * xv, 0.0) + (1 - alpha) * weighted_sum
+        total_weight = jnp.where(valid, alpha, 0.0) + (1 - alpha) * total_weight
         return (weighted_sum, total_weight), weighted_sum / total_weight
 
     n_cols = block.shape[1]
@@ -3707,6 +4993,8 @@ def _ewm_var_block(block, alpha, min_periods):
 
     def scan_fn(carry, x):
         old_mean, old_var, total_weight = carry
+        # NaN entries don't move the mean/var (pandas skips them)
+        x = jnp.where(jnp.isnan(x), old_mean, x)
         total_weight = alpha + (1 - alpha) * total_weight
         new_mean = alpha * x + (1 - alpha) * old_mean
         new_var = (1 - alpha) * (old_var + alpha * (x - old_mean) ** 2)
@@ -3858,22 +5146,25 @@ class TimeRolling:
 
 @functools.partial(jax.jit, static_argnums=(2,))
 def _segment_sum(data, ids, num):
-    return jax.ops.segment_sum(data, ids, num)
+    # NaN-aware: pandas groupby skips NaN
+    return jax.ops.segment_sum(jnp.where(jnp.isnan(data), 0, data), ids, num)
 
 
 @functools.partial(jax.jit, static_argnums=(2,))
 def _segment_mean(data, ids, num):
-    sums = jax.ops.segment_sum(data, ids, num)
-    counts = jax.ops.segment_sum(jnp.ones_like(data), ids, num)
+    valid = ~jnp.isnan(data)
+    sums = jax.ops.segment_sum(jnp.where(valid, data, 0), ids, num)
+    counts = jax.ops.segment_sum(valid.astype(data.dtype), ids, num)
     return sums / counts
 
 
 @functools.partial(jax.jit, static_argnums=(2,))
 def _segment_var(data, ids, num, ddof):
-    counts = jax.ops.segment_sum(jnp.ones_like(data), ids, num)
-    sums = jax.ops.segment_sum(data, ids, num)
+    valid = ~jnp.isnan(data)
+    counts = jax.ops.segment_sum(valid.astype(data.dtype), ids, num)
+    sums = jax.ops.segment_sum(jnp.where(valid, data, 0), ids, num)
     means = sums / counts
-    sq_devs = (data - means[ids]) ** 2
+    sq_devs = jnp.where(valid, (data - means[ids]) ** 2, 0)
     sum_sq = jax.ops.segment_sum(sq_devs, ids, num)
     return sum_sq / (counts - ddof)
 

@@ -28,6 +28,17 @@ Three phases, ~230 new API members, 310 new tests (898 passing total):
    (5460), rank 4.1ms (60ms), corr 56us (661), sum-axis0 61us (403),
    sort_values 3.4ms (4.3ms).
 
+### Addendum (same day): sequential-scan windows were the last pandas losses
+Full benchmark run (174 cells) showed 27 wins / 3 losses at the largest sizes —
+the losses were expanding sum/mean and ewm mean at 1M rows: **~30 seconds** vs
+pandas 0.17s. `jax.lax.scan` is sequential; GPUs execute it one step at a time.
+Rewrote expanding sum/mean/var/min/max as cumsum/cummin/cummax prefix ops and
+EWM mean as `jax.lax.associative_scan` over the linear recurrence
+(h_t = d*h_{t-1} + c_t composes associatively as (c,d) pairs). 30s → <100ms.
+EWM var/std still use scan (nonlinear mean-variance coupling) — acceptable
+until someone needs ewm.std at millions of rows. Guarded by
+tests/test_window_perf.py (time-bound + 10k-row NaN equivalence).
+
 ### Key findings
 - **Tuple-operand `lax.reduce` has no transpose rule** — grad dies with
   `ad_util.Zero passed to reshape`. Single-operand reduces are differentiable

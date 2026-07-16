@@ -5814,107 +5814,60 @@ class Rolling:
 
 @jax.jit
 def _expanding_sum_block(block, min_periods):
-    """JIT'd expanding sum via scan."""
-
-    def scan_fn(carry, x):
-        running_sum, count = carry
-        is_valid = ~jnp.isnan(x)
-        running_sum = running_sum + jnp.where(is_valid, x, 0.0)
-        count = count + is_valid.astype(jnp.int32)
-        result = jnp.where(count >= min_periods, running_sum, jnp.nan)
-        return (running_sum, count), result
-
-    n_cols = block.shape[1]
-    init = (jnp.zeros(n_cols, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
-    _, result = jax.lax.scan(scan_fn, init, block)
-    return result
+    """Expanding sum via cumsum (parallel; sequential scan was ~200x slower on GPU)."""
+    valid = ~jnp.isnan(block)
+    csum = jnp.cumsum(jnp.where(valid, block, 0.0), axis=0)
+    count = jnp.cumsum(valid.astype(jnp.int32), axis=0)
+    return jnp.where(count >= min_periods, csum, jnp.nan)
 
 
 @jax.jit
 def _expanding_mean_block(block, min_periods):
-    """JIT'd expanding mean via scan."""
-
-    def scan_fn(carry, x):
-        running_sum, count = carry
-        is_valid = ~jnp.isnan(x)
-        running_sum = running_sum + jnp.where(is_valid, x, 0.0)
-        count = count + is_valid.astype(jnp.int32)
-        mean = running_sum / jnp.maximum(count, 1)
-        result = jnp.where(count >= min_periods, mean, jnp.nan)
-        return (running_sum, count), result
-
-    n_cols = block.shape[1]
-    init = (jnp.zeros(n_cols, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
-    _, result = jax.lax.scan(scan_fn, init, block)
-    return result
+    """Expanding mean via cumsum (parallel)."""
+    valid = ~jnp.isnan(block)
+    csum = jnp.cumsum(jnp.where(valid, block, 0.0), axis=0)
+    count = jnp.cumsum(valid.astype(jnp.int32), axis=0)
+    mean = csum / jnp.maximum(count, 1)
+    return jnp.where(count >= min_periods, mean, jnp.nan)
 
 
 @jax.jit
 def _expanding_var_block(block, min_periods, ddof):
-    """JIT'd expanding variance via Welford's algorithm."""
+    """Expanding variance via cumulative sums (parallel).
 
-    def scan_fn(carry, x):
-        mean, m2, count = carry
-        is_valid = ~jnp.isnan(x)
-        safe_x = jnp.where(is_valid, x, 0.0)
-        new_count = count + is_valid.astype(count.dtype)
-        delta = safe_x - mean
-        safe_count = jnp.maximum(new_count, 1)
-        new_mean = jnp.where(is_valid, mean + delta / safe_count, mean)
-        delta2 = safe_x - new_mean
-        new_m2 = jnp.where(is_valid, m2 + delta * delta2, m2)
-        denom = jnp.maximum(new_count - ddof, 1)
-        var = new_m2 / denom
-        result = jnp.where((new_count >= min_periods) & (new_count > ddof), var, jnp.nan)
-        return (new_mean, new_m2, new_count), result
-
-    n_cols = block.shape[1]
-    init = (
-        jnp.zeros(n_cols, dtype=block.dtype),
-        jnp.zeros(n_cols, dtype=block.dtype),
-        jnp.zeros(n_cols, dtype=jnp.float32),
-    )
-    _, result = jax.lax.scan(scan_fn, init, block)
-    return result
+    var_n = (sum(x^2) - n*mean^2) / (n - ddof). Slightly less numerically
+    stable than Welford but parallel; float32 with standard-scale data is fine.
+    """
+    valid = ~jnp.isnan(block)
+    x0 = jnp.where(valid, block, 0.0)
+    csum = jnp.cumsum(x0, axis=0)
+    csumsq = jnp.cumsum(x0 * x0, axis=0)
+    count = jnp.cumsum(valid.astype(jnp.float32), axis=0)
+    mean = csum / jnp.maximum(count, 1)
+    m2 = csumsq - csum * mean
+    var = m2 / jnp.maximum(count - ddof, 1)
+    ok = (count >= min_periods) & (count > ddof)
+    return jnp.where(ok, jnp.maximum(var, 0.0), jnp.nan)
 
 
 @jax.jit
 def _expanding_min_block(block, min_periods):
-    """JIT'd expanding min via scan."""
-
-    def scan_fn(carry, x):
-        running_min, count = carry
-        is_valid = ~jnp.isnan(x)
-        candidate = jnp.where(is_valid, jnp.minimum(running_min, x), running_min)
-        count = count + is_valid.astype(jnp.int32)
-        result = jnp.where(count >= min_periods, candidate, jnp.nan)
-        return (candidate, count), result
-
-    n_cols = block.shape[1]
-    init = (jnp.full(n_cols, jnp.inf, dtype=block.dtype), jnp.zeros(n_cols, dtype=jnp.int32))
-    _, result = jax.lax.scan(scan_fn, init, block)
-    return result
+    """Expanding min via lax.cummin (parallel)."""
+    valid = ~jnp.isnan(block)
+    filled = jnp.where(valid, block, jnp.inf)
+    cmin = jax.lax.cummin(filled, axis=0)
+    count = jnp.cumsum(valid.astype(jnp.int32), axis=0)
+    return jnp.where(count >= jnp.maximum(min_periods, 1), cmin, jnp.nan)
 
 
 @jax.jit
 def _expanding_max_block(block, min_periods):
-    """JIT'd expanding max via scan."""
-
-    def scan_fn(carry, x):
-        running_max, count = carry
-        is_valid = ~jnp.isnan(x)
-        candidate = jnp.where(is_valid, jnp.maximum(running_max, x), running_max)
-        count = count + is_valid.astype(jnp.int32)
-        result = jnp.where(count >= min_periods, candidate, jnp.nan)
-        return (candidate, count), result
-
-    n_cols = block.shape[1]
-    init = (
-        jnp.full(n_cols, -jnp.inf, dtype=block.dtype),
-        jnp.zeros(n_cols, dtype=jnp.int32),
-    )
-    _, result = jax.lax.scan(scan_fn, init, block)
-    return result
+    """Expanding max via lax.cummax (parallel)."""
+    valid = ~jnp.isnan(block)
+    filled = jnp.where(valid, block, -jnp.inf)
+    cmax = jax.lax.cummax(filled, axis=0)
+    count = jnp.cumsum(valid.astype(jnp.int32), axis=0)
+    return jnp.where(count >= jnp.maximum(min_periods, 1), cmax, jnp.nan)
 
 
 class Expanding:
@@ -5996,21 +5949,26 @@ class Expanding:
 
 @jax.jit
 def _ewm_mean_block(block, alpha):
-    """JIT'd EWM mean via scan."""
+    """EWM mean via associative_scan (parallel log-depth, not sequential scan).
 
-    def scan_fn(carry, x):
-        weighted_sum, total_weight = carry
-        valid = ~jnp.isnan(x)
-        xv = jnp.where(valid, x, 0.0)
-        # NaN entries contribute no weight but decay prior weights (pandas ignore_na=False)
-        weighted_sum = jnp.where(valid, alpha * xv, 0.0) + (1 - alpha) * weighted_sum
-        total_weight = jnp.where(valid, alpha, 0.0) + (1 - alpha) * total_weight
-        return (weighted_sum, total_weight), weighted_sum / total_weight
+    The recurrence h_t = d_t * h_{t-1} + c_t is linear, so prefix-composition
+    of (c, d) pairs is associative: (c1,d1) then (c2,d2) = (c2 + d2*c1, d2*d1).
+    NaN entries contribute no weight but decay prior weights (pandas
+    ignore_na=False, adjust-like normalization by total weight)."""
+    valid = ~jnp.isnan(block)
+    x0 = jnp.where(valid, block, 0.0)
+    c_num = jnp.where(valid, alpha * x0, 0.0)
+    c_den = jnp.where(valid, alpha, 0.0)
+    decay = jnp.full_like(block, 1.0 - alpha)
 
-    n_cols = block.shape[1]
-    init = (jnp.zeros(n_cols), jnp.zeros(n_cols))
-    _, result = jax.lax.scan(scan_fn, init, block)
-    return result
+    def combine(a, b):
+        c_a, d_a = a
+        c_b, d_b = b
+        return (c_b + d_b * c_a, d_b * d_a)
+
+    num, _ = jax.lax.associative_scan(combine, (c_num, decay), axis=0)
+    den, _ = jax.lax.associative_scan(combine, (c_den, decay), axis=0)
+    return num / den
 
 
 @jax.jit

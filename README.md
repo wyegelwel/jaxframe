@@ -9,12 +9,17 @@ A JAX-based DataFrame library that mirrors the pandas API with support for autom
 - No JIT compilation
 - No GPU/TPU acceleration
 
-**JAXFrame** combines a pandas-like API with JAX's transformations:
-- Familiar pandas-like API (reductions, arithmetic, rolling, groupby, etc.)
+**JAXFrame** combines the pandas API with JAX's transformations:
+- **1-1 pandas API coverage**: every public `DataFrame`/`Series` member is
+  implemented (enforced by `tests/test_api_coverage.py`), except a short
+  declared out-of-scope list (tz/Period semantics, MultiIndex, sparse/arrow
+  accessors, resample — see `scripts/api_coverage.py`)
 - JIT compilation for faster repeated computations
-- Automatic differentiation (`jax.grad`) through DataFrame operations
+- Automatic differentiation (`jax.grad`) through DataFrame operations —
+  including sort, top-k, min/max, quantiles, ffill/interpolate (subgradients)
 - Vectorization (`jax.vmap`) across batches of DataFrames
-- GPU support via JAX
+- GPU support via JAX; compute ops are JAX-native, formatting/exotic I/O
+  delegate to pandas
 
 ## Quick Start
 
@@ -113,8 +118,8 @@ DataFrames are registered as JAX pytrees, so they work with the full JAX transfo
 
 | Transform | Status | Notes |
 |-----------|--------|-------|
-| `jax.jit` | Supported | All pure-JAX ops; eager structure discovery ops (groupby, sort) must happen outside jit |
-| `jax.grad` | Supported | Float operations only; non-smooth ops (min/max) and boolean outputs excluded |
+| `jax.jit` | Supported | Shape-preserving ops incl. sort_values/rank/nlargest/ffill/interpolate; shape-changing + unique-based ops (filtering, dropna, merge/groupby discovery) stay eager |
+| `jax.grad` | Supported | JAX subgradient convention: min/max/median/quantile/sort/top-k differentiable; boolean/integer outputs excluded |
 | `jax.vmap` | Supported | Batch a function over stacked DataFrames |
 | `jax.pmap` | Supported | Multi-device parallelism (same mechanism as vmap; tested but not battle-tested in production) |
 
@@ -125,8 +130,13 @@ JAXFrame uses a **hybrid eager/JIT** architecture: structure discovery (shapes, 
 **Not supported inside `jax.jit`:**
 ```python
 df[df['price'] > 100]      # Dynamic filtering (changes shape)
-df.sort_values('col')       # Argsort needs concrete values
+df.dropna()                 # Shape depends on data
+df.merge(other)             # Key matching is structure discovery
 ```
+
+**Supported inside `jax.jit`** (shape-preserving): `sort_values`, `rank`,
+`nlargest`/`nsmallest`, `ffill`/`bfill`/`interpolate`, `cummax`/`cummin`,
+all arithmetic/reductions/rolling/expanding/ewm and groupby aggregations.
 
 **JIT-compatible alternatives:**
 ```python

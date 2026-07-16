@@ -466,6 +466,21 @@ class DataFrame:
         if not self._dtype_blocks:
             raise ValueError("DataFrame has no numeric columns")
 
+        # Cached like _get_column_data: frames are immutable except via
+        # _replace_self, which clears this cache.
+        cached = self.__dict__.get("_values_cache")
+        if cached is not None:
+            return cached
+
+        # Single block in column order: no promotion or concat needed
+        if len(self._dtype_blocks) == 1:
+            block = next(iter(self._dtype_blocks.values()))
+            numeric_cols = [col for col in self._column_order if col in self._column_to_block]
+            in_order = all(self._column_to_block[col][1] == i for i, col in enumerate(numeric_cols))
+            if in_order and block.shape[1] == len(numeric_cols):
+                self.__dict__["_values_cache"] = block
+                return block
+
         # Get the promoted dtype for all blocks
         all_dtypes = list(self._dtype_blocks.keys())
         promoted_dtype = all_dtypes[0]
@@ -482,7 +497,9 @@ class DataFrame:
             col_data = block[:, idx : idx + 1]  # Keep 2D shape
             columns.append(col_data.astype(promoted_dtype))
 
-        return jnp.concatenate(columns, axis=1)
+        result = jnp.concatenate(columns, axis=1)
+        self.__dict__["_values_cache"] = result
+        return result
 
     @property
     def empty(self) -> bool:
@@ -632,27 +649,29 @@ class DataFrame:
             >>> df[['price', 'quantity']]  # Multiple columns -> DataFrame
         """
         if isinstance(key, str):
-            # Single column
-            if key in self._numeric_cols:
-                col_idx = self._numeric_cols.index(key)
-                return Series(self._numeric_data[:, col_idx], index=self._index, name=key)
+            # Single column — slice its dtype block directly (one dispatch);
+            # never build the full promoted matrix here.
+            if key in self._column_to_block:
+                return Series(self._get_column_data(key), index=self._index, name=key)
             elif key in self._object_data:
                 return Series(self._object_data[key], index=self._index, name=key)
             else:
                 raise KeyError(f"Column '{key}' not found")
 
         elif isinstance(key, list):
-            # Multiple columns
-            new_data = {}
+            # Multiple columns — per-column block slices, no promotion
+            col_arrays = {}
+            object_data = {}
             for col in key:
-                if col in self._numeric_cols:
-                    col_idx = self._numeric_cols.index(col)
-                    new_data[col] = self._numeric_data[:, col_idx]
+                if col in self._column_to_block:
+                    col_arrays[col] = self._get_column_data(col)
                 elif col in self._object_data:
-                    new_data[col] = self._object_data[col]
+                    object_data[col] = self._object_data[col]
                 else:
                     raise KeyError(f"Column '{col}' not found")
-            return DataFrame(new_data, index=self._index)
+            return DataFrame._from_column_arrays(
+                col_arrays, list(key), self._index, object_data=object_data
+            )
 
         else:
             raise TypeError(f"Unsupported key type: {type(key)}")
@@ -1425,15 +1444,14 @@ class DataFrame:
             dtype, idx = self._column_to_block[col]
             k = self._dtype_blocks[dtype][:, idx]
             keys.append(k if asc else -k)
+        dtypes_order = list(self._dtype_blocks.keys())
+        blocks = tuple(self._dtype_blocks[dt] for dt in dtypes_order)
         if len(keys) == 1:
-            order = jnp.argsort(keys[0], stable=True)
+            sorted_blocks, order = _argsort_take_blocks(blocks, keys[0])
         else:
             # lexsort: last key is primary
-            order = jnp.lexsort(jnp.stack(keys[::-1]))
-        # Data computation: JAX gather
-        new_blocks = {
-            dt: jnp.take(block, order, axis=0) for dt, block in self._dtype_blocks.items()
-        }
+            sorted_blocks, order = _lexsort_take_blocks(blocks, jnp.stack(keys[::-1]))
+        new_blocks = dict(zip(dtypes_order, sorted_blocks))
         if _is_tracer(order):
             new_index, new_obj = self._index, self._object_data
         else:
@@ -2393,6 +2411,8 @@ class DataFrame:
         self._object_data = df._object_data
         self._index = df._index
         self._column_order = df._column_order
+        self.__dict__.pop("_col_cache", None)  # cached column slices are stale now
+        self.__dict__.pop("_values_cache", None)
 
     def __setitem__(self, key, value):
         """Add or replace a column. Eager, mutates self."""
@@ -3342,10 +3362,21 @@ class DataFrame:
     # ========================================
 
     def _get_column_data(self, col_name: str) -> jnp.ndarray:
-        """Get data for a single column as 1D array."""
+        """Get data for a single column as 1D array.
+
+        Column slices are cached per frame: JAX arrays are immutable and every
+        mutating DataFrame op goes through _replace_self (which clears the
+        cache), so a cached slice can never go stale. This turns repeated
+        column access from a device dispatch into a dict lookup."""
         if col_name in self._column_to_block:
-            dtype, idx = self._column_to_block[col_name]
-            return self._dtype_blocks[dtype][:, idx]
+            cache = self.__dict__.get("_col_cache")
+            if cache is None:
+                cache = self.__dict__["_col_cache"] = {}
+            arr = cache.get(col_name)
+            if arr is None:
+                dtype, idx = self._column_to_block[col_name]
+                arr = cache[col_name] = self._dtype_blocks[dtype][:, idx]
+            return arr
         elif col_name in self._object_data:
             return self._object_data[col_name]
         else:
@@ -3877,6 +3908,22 @@ def _is_tracer(x) -> bool:
     return isinstance(x, jax.core.Tracer)
 
 
+@jax.jit
+def _argsort_take_blocks(blocks, key):
+    """Fused argsort + gather for sort_values: one compiled kernel instead of
+    one dispatch per block. blocks is a tuple pytree; returns (blocks, order)."""
+    order = jnp.argsort(key, stable=True)
+    return tuple(jnp.take(b, order, axis=0) for b in blocks), order
+
+
+@jax.jit
+def _lexsort_take_blocks(blocks, keys):
+    """Fused lexsort + gather (multi-key sort_values)."""
+    order = jnp.lexsort(keys)
+    return tuple(jnp.take(b, order, axis=0) for b in blocks), order
+
+
+@functools.partial(jax.jit, static_argnames=("axis",))
 def _ffill_array(arr, axis: int = 0):
     """Forward-fill NaNs along axis. JIT-compatible, grad flows through gather.
 
@@ -3894,12 +3941,14 @@ def _ffill_array(arr, axis: int = 0):
     return jnp.where(last_valid < 0, jnp.nan, gathered)
 
 
+@functools.partial(jax.jit, static_argnames=("axis",))
 def _bfill_array(arr, axis: int = 0):
     """Backward-fill NaNs along axis. JIT-compatible, grad flows through gather."""
     flipped = jnp.flip(arr, axis=axis)
     return jnp.flip(_ffill_array(flipped, axis=axis), axis=axis)
 
 
+@functools.partial(jax.jit, static_argnames=("axis",))
 def _interpolate_array(arr, axis: int = 0):
     """Linear interpolation of interior NaNs along axis; trailing NaNs are
     forward-filled, leading NaNs kept (pandas .interpolate() default).
@@ -3927,6 +3976,7 @@ def _interpolate_array(arr, axis: int = 0):
     return jnp.where(isnan, filled, arr)
 
 
+@functools.partial(jax.jit, static_argnames=("method", "ascending"))
 def _rank_1d(x, method: str = "average", ascending: bool = True):
     """Rank a 1D array, pandas semantics (NaNs get NaN rank).
 
@@ -3962,6 +4012,7 @@ def _rank_1d(x, method: str = "average", ascending: bool = True):
     return jnp.where(isnan, jnp.nan, ranks.astype(jnp.float32))
 
 
+@jax.jit
 def _nan_pearson(x, y):
     """Pearson correlation over pairwise-complete observations. JIT-compatible."""
     valid = ~(jnp.isnan(x) | jnp.isnan(y))
@@ -3978,6 +4029,7 @@ def _nan_pearson(x, y):
     return cov / (sx * sy)
 
 
+@functools.partial(jax.jit, static_argnames=("ddof",))
 def _nan_cov(x, y, ddof: int = 1):
     """Covariance over pairwise-complete observations. JIT-compatible."""
     valid = ~(jnp.isnan(x) | jnp.isnan(y))
@@ -3991,6 +4043,7 @@ def _nan_cov(x, y, ddof: int = 1):
     return jnp.sum(dx * dy) / (n - ddof)
 
 
+@functools.partial(jax.jit, static_argnames=("axis",))
 def _cummax_pandas(arr, axis: int = 0):
     """Cumulative max, pandas NaN semantics (NaN stays NaN, max carries through)."""
     isnan = jnp.isnan(arr)
@@ -3999,6 +4052,7 @@ def _cummax_pandas(arr, axis: int = 0):
     return jnp.where(isnan, jnp.nan, cm)
 
 
+@functools.partial(jax.jit, static_argnames=("axis",))
 def _cummin_pandas(arr, axis: int = 0):
     """Cumulative min, pandas NaN semantics."""
     isnan = jnp.isnan(arr)

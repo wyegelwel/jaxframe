@@ -4,6 +4,56 @@ Record of optimization work, findings, and lessons learned.
 
 ---
 
+## 2026-07-16: 1-1 Pandas API Parity + JIT/grad Maximization + Latency Pass
+
+### What changed
+Three phases, ~230 new API members, 310 new tests (898 passing total):
+
+1. **API parity (100%)** — Series grew from 17 to ~200 public members, DataFrame
+   from 88 to ~190. `scripts/api_coverage.py` diffs our surface against pandas
+   with a NOT_PLANNED allowlist (tz/Period, MultiIndex, sparse/arrow accessors,
+   resample); `tests/test_api_coverage.py` asserts 100% so drift fails CI.
+   Compute ops are JAX-native; formatting/plotting/exotic I/O delegate via
+   `to_pandas()`.
+
+2. **JIT/grad maximization** — sort_values (jnp.argsort/lexsort + gather),
+   rank (sort + searchsorted vmapped, pandas 'average' default), interpolate
+   (cummax-of-valid-indices), ffill/bfill, cummax/cummin, nlargest/nsmallest
+   (lax.top_k) are all traceable now. Grad flags flipped to the JAX subgradient
+   convention: min/max/median/quantile/rolling extremes/groupby extremes/
+   first/last/sort/top-k are differentiable.
+
+3. **Latency** — headline eager numbers vs pandas (RTX 3080, WSL2, 100k rows,
+   5 float cols): getitem 0.9us (pandas 7.5), ffill 65us (1346), cummax 108us
+   (5460), rank 4.1ms (60ms), corr 56us (661), sum-axis0 61us (403),
+   sort_values 3.4ms (4.3ms).
+
+### Key findings
+- **Tuple-operand `lax.reduce` has no transpose rule** — grad dies with
+  `ad_util.Zero passed to reshape`. Single-operand reduces are differentiable
+  and XLA fuses them anyway. This silently made mean/var/std(axis=0)
+  non-differentiable for months.
+- **Merge had a real correctness bug**: unmatched rows got gather index -1,
+  which Python-wraps to the *last row* instead of NaN. Every left/right/outer
+  merge with unmatched keys returned wrong data. Caught by the new join tests.
+- **`__getitem__` built the full promoted `values` matrix per column access**
+  (N slices + casts + concat ≈ 4.4ms) instead of slicing one block (1 dispatch).
+- **Column-slice caching is free correctness-wise**: JAX arrays are immutable
+  and all mutating ops funnel through `_replace_self`, so `_get_column_data`
+  caches slices per frame and invalidates there. 645us → 0.9us.
+- **Self-JIT the shared kernels** (`_ffill_array`, `_rank_1d`, ...) with
+  `functools.partial(jax.jit, static_argnames=...)` — eager callers get one
+  fused kernel instead of ~8 dispatches (ffill 2.3ms → 90us). Same pattern as
+  the earlier `_fast_nansum` work; it generalizes.
+- **Eager small-n sort is host-sync-bound**, not dispatch-bound: reordering the
+  numpy index requires `np.asarray(order)` (device→host). Fusing
+  argsort+gather into one kernel helped large-n only. Floor ≈ 1.9ms at n=1k on
+  this box; pandas wins tiny sorts, we win from ~100k rows.
+- **jit-defined-in-method lambdas recompile every call** — fused kernels must
+  live at module level for cache hits (stable function identity).
+
+---
+
 ## 2026-04-29: Benchmark Honesty + Expanding Rewrite
 
 ### Problem

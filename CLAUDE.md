@@ -103,12 +103,13 @@ When adding new ops, update this table and `_JAX_COMPAT` in dataframe.py.
 
 Priority order:
 
-1. **np → jnp audit** — Many eager ops still use `np.*` which forces data to CPU. Audit and migrate to `jnp.*` so the entire library is GPU-native. Key targets: `duplicated`, `value_counts`, `sort_index`, `nunique`, `mode`, any `np.asarray`/`np.unique`/`np.argsort` on data arrays.
-2. **Benchmarks** — Run `test_benchmarks.py`, validate jaxframe+JIT beats pandas for numeric ops. Profile and fix bottlenecks.
-3. **Real-world dogfood** — Use jaxframe for an actual ML workflow (load → clean → feature engineer → train with grad) to find gaps.
-4. **Merge to main + packaging** — Squash/rebase feature branch to main, add README, publish to PyPI.
-5. **Memory/perf of expanding/rolling** — `expanding()` creates O(n²) gather matrix. Replace with cumulative ops for scalability.
-6. **vmap support** — Test and support `jax.vmap` for batched operations.
+1. **Real-world dogfood** — Use jaxframe for an actual ML workflow (load → clean → feature engineer → train with grad) to find gaps. API is at 100% pandas parity; dogfooding is the best remaining bug-finder.
+2. **Merge to main + packaging** — README claims are current; publish to PyPI.
+3. **np → jnp residual audit** — Most data paths are jnp; remaining np is in eager structure discovery (unique/duplicated/merge key matching), which is intentional. Revisit only if GPU-resident structure discovery becomes a bottleneck.
+4. **vmap coverage for new ops** — sort_values/rank/ffill are jit+grad tested; extend the vmap matrix to them.
+5. **Small-n dispatch floor** — eager ops cost ~250us/dispatch on this box (WSL2 GPU). If small-data latency matters, consider a CPU-array fast path below a size threshold.
+
+Done (2026-07): 1-1 pandas API coverage (enforced by tests/test_api_coverage.py), JIT+grad maximization (sort/rank/top-k/fills traceable; subgradient convention), latency pass (column cache, self-JIT kernels, fused sort; eager beats pandas at 100k rows on most numeric ops).
 
 ## Tools
 

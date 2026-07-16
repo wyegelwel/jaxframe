@@ -1,5 +1,12 @@
 # Pandas API Coverage Plan for JAXFrame
 
+> **STATUS (2026-07-16): GOAL REACHED — this plan is historical.**
+> Coverage is now 100% of the pandas public API for both DataFrame and Series,
+> minus a short declared out-of-scope list. The live source of truth is
+> `scripts/api_coverage.py` (run it for a report) and
+> `tests/test_api_coverage.py` (enforces 100% in CI). The tables below are the
+> original planning snapshot and are no longer maintained.
+
 Comprehensive plan to mirror the pandas API with JAX support indicators.
 
 ## Legend

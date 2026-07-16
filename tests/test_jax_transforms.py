@@ -22,8 +22,8 @@ OPERATIONS = [
     ("mean", lambda df: df.mean(axis=None), True, True),
     ("std", lambda df: df.std(axis=None), True, True),
     ("var", lambda df: df.var(axis=None), True, True),
-    ("min", lambda df: df.min(axis=None), True, False),
-    ("max", lambda df: df.max(axis=None), True, False),
+    ("min", lambda df: df.min(axis=None), True, True),  # subgradient at argmin,
+    ("max", lambda df: df.max(axis=None), True, True),  # subgradient at argmax,
     ("prod", lambda df: df.prod(axis=None), True, True),
     # Arithmetic chains
     ("mul_sum", lambda df: (df * 2).sum(axis=None), True, True),
@@ -52,18 +52,23 @@ OPERATIONS = [
     ("cumsum_ax1_sum", lambda df: df.cumsum(axis=1).sum(axis=None), True, True),
     ("cumprod_ax1_sum", lambda df: df.cumprod(axis=1).sum(axis=None), True, True),
     ("count_sum", lambda df: df.count().sum(), True, False),
-    ("median_sum", lambda df: df.median().sum(), True, False),
+    ("median_sum", lambda df: df.median().sum(), True, True),  # quantile interp grad,
     # Copy (Session 3) — copy then reduce
     ("copy_sum", lambda df: df.copy().sum(axis=None), True, True),
     # Sorting (Session 4) — argsort not differentiable
-    ("sort_sum", lambda df: df.sort_values("a").sum(axis=None), False, False),
+    (
+        "sort_sum",
+        lambda df: df.sort_values("a").sum(axis=None),
+        True,
+        True,
+    ),  # jnp.argsort + gather,
     # Describe & quantile (Session 5)
-    ("quantile_sum", lambda df: df.quantile(0.5).sum(), True, False),
-    ("nlargest_sum", lambda df: df.nlargest(2, "a").sum(axis=None), False, False),
-    ("nsmallest_sum", lambda df: df.nsmallest(2, "a").sum(axis=None), False, False),
+    ("quantile_sum", lambda df: df.quantile(0.5).sum(), True, True),
+    ("nlargest_sum", lambda df: df.nlargest(2, "a").sum(axis=None), True, True),
+    ("nsmallest_sum", lambda df: df.nsmallest(2, "a").sum(axis=None), True, True),
     # pipe, between, rank
     ("pipe_sum", lambda df: df.pipe(lambda d: d * 2).sum(axis=None), True, True),
-    ("rank_sum", lambda df: df.rank().sum(axis=None), False, False),
+    ("rank_sum", lambda df: df.rank().sum(axis=None), True, False),  # step function: zero grad,
     # Column manipulation (Session 6)
     ("drop_sum", lambda df: df.drop(columns=["a"]).sum(axis=None), True, True),
     ("rename_sum", lambda df: df.rename(columns={"a": "x"}).sum(axis=None), True, True),
@@ -83,15 +88,32 @@ OPERATIONS = [
     # Session 16: Rolling windows (fixed-size, JIT-compatible)
     ("roll_sum", lambda df: df.rolling(2).sum().sum(axis=None), True, True),
     ("roll_mean", lambda df: df.rolling(2).mean().sum(axis=None), True, True),
-    ("roll_min", lambda df: df.rolling(2).min().sum(axis=None), True, False),
-    ("roll_max", lambda df: df.rolling(2).max().sum(axis=None), True, False),
+    ("roll_min", lambda df: df.rolling(2).min().sum(axis=None), True, True),
+    ("roll_max", lambda df: df.rolling(2).max().sum(axis=None), True, True),
     # Expanding windows (JIT-compatible)
     ("exp_sum", lambda df: df.expanding().sum().sum(axis=None), True, True),
     ("exp_mean", lambda df: df.expanding().mean().sum(axis=None), True, True),
-    ("exp_min", lambda df: df.expanding().min().sum(axis=None), True, False),
-    ("exp_max", lambda df: df.expanding().max().sum(axis=None), True, False),
+    ("exp_min", lambda df: df.expanding().min().sum(axis=None), True, True),
+    ("exp_max", lambda df: df.expanding().max().sum(axis=None), True, True),
     # EWM
     ("ewm_mean", lambda df: df.ewm(span=2).mean().sum(axis=None), True, True),
+    # API-parity expansion: fills / cumulative / named ops / gathers
+    ("ffill_sum", lambda df: df.ffill().sum(axis=None), True, True),
+    ("bfill_sum", lambda df: df.bfill().sum(axis=None), True, True),
+    ("interp_sum", lambda df: df.interpolate().sum(axis=None), True, True),
+    ("cummax_sum", lambda df: df.cummax().sum(axis=None), True, True),
+    ("cummin_sum", lambda df: df.cummin().sum(axis=None), True, True),
+    ("named_add_sum", lambda df: df.add(2).sum(axis=None), True, True),
+    ("named_rsub_sum", lambda df: df.rsub(10).sum(axis=None), True, True),
+    ("named_div_sum", lambda df: df.div(2).sum(axis=None), True, True),
+    ("named_pow_sum", lambda df: df.pow(2).sum(axis=None), True, True),
+    ("eq_sum", lambda df: df.eq(2.0).sum(axis=None), True, False),  # boolean output
+    ("take_sum", lambda df: df.take([0, 2]).sum(axis=None), True, True),
+    ("mask_sum", lambda df: df.mask(df > 3, 0.0).sum(axis=None), True, True),
+    ("replace_sum", lambda df: df.replace(2.0, 5.0).sum(axis=None), True, True),
+    ("transform_sum", lambda df: df.transform(lambda x: x * 2).sum(axis=None), True, True),
+    ("agg_mean_sum", lambda df: df.agg("mean").values.sum(), True, True),
+    ("dot_sum", lambda df: (df @ jnp.ones((2,))).sum(), True, True),
     # Session 17: skew, kurt, sem (JIT+grad)
     ("skew_sum", lambda df: df.skew().values.sum(), True, True),
     ("sem_sum", lambda df: df.sem().values.sum(), True, True),
@@ -102,14 +124,14 @@ OPERATIONS = [
 GROUPBY_OPS = [
     ("gb_sum", lambda sgb: sgb.sum().values.sum(), True, True),
     ("gb_mean", lambda sgb: sgb.mean().values.sum(), True, True),
-    ("gb_min", lambda sgb: sgb.min().values.sum(), True, False),
-    ("gb_max", lambda sgb: sgb.max().values.sum(), True, False),
+    ("gb_min", lambda sgb: sgb.min().values.sum(), True, True),  # segment_min grad,
+    ("gb_max", lambda sgb: sgb.max().values.sum(), True, True),
     ("gb_var", lambda sgb: sgb.var().values.sum(), True, True),
     ("gb_std", lambda sgb: sgb.std().values.sum(), True, True),
     ("gb_count", lambda sgb: sgb.count().values.sum(), True, False),
     ("gb_prod", lambda sgb: sgb.prod().values.sum(), True, False),
-    ("gb_first", lambda sgb: sgb.first().values.sum(), True, False),
-    ("gb_last", lambda sgb: sgb.last().values.sum(), True, False),
+    ("gb_first", lambda sgb: sgb.first().values.sum(), True, True),  # gather grad,
+    ("gb_last", lambda sgb: sgb.last().values.sum(), True, True),
     ("gb_transform_sum", lambda sgb: sgb.transform("sum").values.sum(), True, True),
     ("gb_transform_mean", lambda sgb: sgb.transform("mean").values.sum(), True, True),
 ]

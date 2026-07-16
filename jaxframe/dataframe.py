@@ -141,9 +141,9 @@ _JAX_COMPAT = [
     ("std", True, True, None),
     ("var", True, True, None),
     ("prod", True, True, None),
-    ("min", True, False, "Non-smooth (gradient undefined at argmin/argmax)"),
-    ("max", True, False, "Non-smooth (gradient undefined at argmin/argmax)"),
-    ("median", True, False, "Non-smooth (sort-based)"),
+    ("min", True, True, "Subgradient at argmin (JAX convention)"),
+    ("max", True, True, "Subgradient at argmax (JAX convention)"),
+    ("median", True, True, "Differentiable via quantile interpolation"),
     ("count", True, False, "Integer output — not real-valued"),
     ("all", True, False, "Boolean output — not real-valued"),
     ("any", True, False, "Boolean output — not real-valued"),
@@ -168,10 +168,23 @@ _JAX_COMPAT = [
     ("round", True, False, "Step function — gradient zero almost everywhere"),
     ("idxmin", True, False, "Discrete (argmin) — not differentiable"),
     ("idxmax", True, False, "Discrete (argmax) — not differentiable"),
-    ("sort_values", True, False, "Permutation-based (argsort) — discrete"),
-    ("nlargest", True, False, "Permutation-based (argsort) — discrete"),
-    ("nsmallest", True, False, "Permutation-based (argsort) — discrete"),
-    ("quantile", True, False, "Non-smooth (sort-based)"),
+    ("sort_values", True, True, "jnp.argsort + gather; grad flows through the permutation"),
+    ("nlargest", True, True, "top_k gather; grad flows to selected rows"),
+    ("nsmallest", True, True, "top_k gather; grad flows to selected rows"),
+    ("quantile", True, True, "Differentiable via interpolation weights"),
+    ("rank", True, False, "Step function — gradient zero a.e."),
+    ("ffill", True, True, None),
+    ("bfill", True, True, None),
+    ("interpolate", True, True, None),
+    ("cummax", True, True, "Grad flows to running-max positions"),
+    ("cummin", True, True, "Grad flows to running-min positions"),
+    ("take", True, True, "Gather — grad flows"),
+    ("mask", True, True, None),
+    ("replace", True, True, "Grad flows through unreplaced values"),
+    ("combine_first", True, True, None),
+    ("transform", True, True, None),
+    ("agg", True, True, "For differentiable aggregators"),
+    ("eq/ne/lt/le/gt/ge", True, False, "Boolean output — not real-valued"),
     # Column ops
     ("drop", True, True, None),
     ("rename", True, True, None),
@@ -180,20 +193,20 @@ _JAX_COMPAT = [
     ("rolling.mean", True, True, None),
     ("rolling.std", True, True, None),
     ("rolling.var", True, True, None),
-    ("rolling.min", True, False, "Non-smooth"),
-    ("rolling.max", True, False, "Non-smooth"),
+    ("rolling.min", True, True, "Subgradient"),
+    ("rolling.max", True, True, "Subgradient"),
     # GroupBy (segment ops)
     ("groupby.sum", True, True, None),
     ("groupby.mean", True, True, None),
     ("groupby.std", True, True, None),
     ("groupby.var", True, True, None),
     ("groupby.transform", True, True, None),
-    ("groupby.min", True, False, "Non-smooth"),
-    ("groupby.max", True, False, "Non-smooth"),
+    ("groupby.min", True, True, "segment_min grad (subgradient)"),
+    ("groupby.max", True, True, "segment_max grad (subgradient)"),
     ("groupby.count", True, False, "Integer output"),
     ("groupby.prod", True, False, "JAX scatter_mul grad unimplemented"),
-    ("groupby.first", True, False, "Discrete (index-based gather)"),
-    ("groupby.last", True, False, "Discrete (index-based gather)"),
+    ("groupby.first", True, True, "Gather — grad flows to first element per group"),
+    ("groupby.last", True, True, "Gather — grad flows to last element per group"),
     # Eager-only (not JIT-compatible)
     ("describe", False, False, "Returns pandas DataFrame"),
     ("to_pandas", False, False, "I/O — outside JAX"),
@@ -844,37 +857,26 @@ class DataFrame:
     @staticmethod
     @jax.jit
     def _fast_nanmean(block):
-        """NaN-skipping mean via single-pass multi-operand lax.reduce."""
+        """NaN-skipping mean via fused single-operand reduces.
+
+        Single-operand lax.reduce is differentiable (tuple-operand is not:
+        its transpose can't handle symbolic Zero cotangents); XLA fuses the
+        two passes under JIT anyway."""
         clean = jnp.where(jnp.isnan(block), 0.0, block)
         valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
-
-        def combiner(a, b):
-            return (a[0] + b[0], a[1] + b[1])
-
-        total, count = jax.lax.reduce(
-            (clean, valid),
-            (jnp.float32(0.0), jnp.float32(0.0)),
-            combiner,
-            [0],
-        )
+        total = jax.lax.reduce(clean, jnp.float32(0.0), jax.lax.add, [0])
+        count = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
         return total / jnp.maximum(count, 1)
 
     @staticmethod
     @jax.jit
     def _fast_nanvar(block, ddof):
-        """NaN-skipping variance via single-pass multi-operand lax.reduce."""
+        """NaN-skipping variance via fused single-operand reduces (differentiable)."""
         clean = jnp.where(jnp.isnan(block), 0.0, block)
         valid = jnp.where(jnp.isnan(block), 0.0, 1.0)
-
-        def combiner(a, b):
-            return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
-
-        total, total_sq, count = jax.lax.reduce(
-            (clean, clean * clean, valid),
-            (jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0)),
-            combiner,
-            [0],
-        )
+        total = jax.lax.reduce(clean, jnp.float32(0.0), jax.lax.add, [0])
+        total_sq = jax.lax.reduce(clean * clean, jnp.float32(0.0), jax.lax.add, [0])
+        count = jax.lax.reduce(valid, jnp.float32(0.0), jax.lax.add, [0])
         mean = total / jnp.maximum(count, 1)
         return (total_sq - count * mean * mean) / jnp.maximum(count - ddof, 1)
 
@@ -1411,27 +1413,38 @@ class DataFrame:
     # ========================================
 
     def sort_values(self, by, ascending=True):
-        """Sort by column values. Eager argsort (structure discovery) + JAX gather."""
+        """Sort by column values (multi-key lexicographic). JIT-compatible:
+        jnp.argsort/lexsort + gather; grad flows through the gather. Index and
+        object columns follow the sort when eager, stay put under a trace."""
         if isinstance(by, str):
             by = [by]
-        # Get the primary sort column
-        col = by[0]
-        dtype, idx = self._column_to_block[col]
-        sort_col = self._dtype_blocks[dtype][:, idx]
-        # Structure discovery: eager np.argsort (much faster than jnp on CPU)
-        order = np.argsort(np.asarray(sort_col), kind="quicksort")
-        if not ascending:
-            order = order[::-1]
+        if isinstance(ascending, bool):
+            ascending = [ascending] * len(by)
+        keys = []
+        for col, asc in zip(by, ascending):
+            dtype, idx = self._column_to_block[col]
+            k = self._dtype_blocks[dtype][:, idx]
+            keys.append(k if asc else -k)
+        if len(keys) == 1:
+            order = jnp.argsort(keys[0], stable=True)
+        else:
+            # lexsort: last key is primary
+            order = jnp.lexsort(jnp.stack(keys[::-1]))
         # Data computation: JAX gather
         new_blocks = {
             dt: jnp.take(block, order, axis=0) for dt, block in self._dtype_blocks.items()
         }
-        # Index is static aux data in pytree — keep original under JIT
+        if _is_tracer(order):
+            new_index, new_obj = self._index, self._object_data
+        else:
+            pos = np.asarray(order)
+            new_index = self._index[pos]
+            new_obj = {k: v[pos] for k, v in self._object_data.items()}
         return DataFrame._from_parts(
             dtype_blocks=new_blocks,
             column_to_block=dict(self._column_to_block),
-            object_data=self._object_data,
-            index=self._index,
+            object_data=new_obj,
+            index=new_index,
             column_order=list(self._column_order),
         )
 
@@ -1450,68 +1463,24 @@ class DataFrame:
             column_order=list(self._column_order),
         )
 
-    def rank(self, ascending=True, method="ordinal"):
-        """Rank values along axis 0. Eager argsort (structure discovery), not differentiable.
+    def rank(self, ascending=True, method="average", axis=0):
+        """Rank values along axis 0, pandas semantics (NaNs get NaN rank).
+
+        JIT-compatible: sort + searchsorted per column (vmapped), no eager
+        argsort. Not differentiable (ranks are a step function of the data).
 
         Args:
             ascending: True for smallest=1 ranking
-            method: 'ordinal' (default) — ties broken by position.
-                    'average', 'min', 'max', 'dense' also supported.
+            method: 'average' (pandas default), 'min', 'max', 'dense',
+                    'first'/'ordinal'.
         """
 
         def _rank_block(block):
-            n = block.shape[0]
-            block_np = np.asarray(block)
-            if method == "ordinal":
-                if ascending:
-                    order = np.argsort(block_np, axis=0, kind="quicksort")
-                else:
-                    order = np.argsort(-block_np, axis=0, kind="quicksort")
-                # Invert permutation: ranks[order[i]] = i+1
-                ranks = np.empty_like(order, dtype=np.float32)
-                arange = np.arange(1, n + 1, dtype=np.float32)
-                np.put_along_axis(ranks, order, arange[:, None], axis=0)
-                return jnp.asarray(ranks)
-            elif method == "average":
-                order = np.argsort(block_np, axis=0, kind="mergesort")
-                sorted_block = np.take_along_axis(block_np, order, axis=0)
-                # Detect tie boundaries across all columns
-                same_as_next = np.zeros((n, block_np.shape[1]), dtype=bool)
-                same_as_next[:-1] = sorted_block[:-1] == sorted_block[1:]
-                # Group IDs per column (cumsum of boundaries)
-                group_id = np.cumsum(~same_as_next, axis=0)
-                zeros = np.zeros((1, block_np.shape[1]), dtype=group_id.dtype)
-                group_id = np.concatenate([zeros, group_id[:-1]], axis=0)
-                # Average rank per group via numpy bincount
-                ordinal_ranks = np.arange(1, n + 1, dtype=np.float64)
-                num_groups = group_id.max() + 1
-                ranks = np.empty((n, block_np.shape[1]), dtype=np.float32)
-                for c in range(block_np.shape[1]):
-                    gid = group_id[:, c]
-                    sums = np.bincount(
-                        gid,
-                        weights=ordinal_ranks,
-                        minlength=num_groups,
-                    )
-                    counts = np.bincount(gid, minlength=num_groups)
-                    avg = sums / np.maximum(counts, 1)
-                    sorted_avg = avg[gid].astype(np.float32)
-                    col_ranks = np.empty(n, dtype=np.float32)
-                    col_ranks[order[:, c]] = sorted_avg
-                    ranks[:, c] = col_ranks
-                if not ascending:
-                    ranks = n + 1 - ranks
-                return jnp.asarray(ranks)
-            else:
-                # Fallback: ordinal
-                if ascending:
-                    order = np.argsort(block_np, axis=0, kind="quicksort")
-                else:
-                    order = np.argsort(-block_np, axis=0, kind="quicksort")
-                ranks = np.empty_like(order, dtype=np.float32)
-                arange = np.arange(1, n + 1, dtype=np.float32)
-                np.put_along_axis(ranks, order, arange[:, None], axis=0)
-                return jnp.asarray(ranks)
+            return jax.vmap(
+                lambda col: _rank_1d(col, method=method, ascending=ascending),
+                in_axes=1,
+                out_axes=1,
+            )(block)
 
         return self._apply_blockwise(_rank_block)
 
@@ -2979,34 +2948,12 @@ class DataFrame:
         return DataFrame(result_data)
 
     def interpolate(self, method="linear"):
-        """Interpolate NaN values. JIT-compatible for 'linear' method.
-
-        Uses linear interpolation between nearest valid observations.
-        """
+        """Interpolate NaN values, pandas semantics: interior NaNs linear,
+        trailing NaNs forward-filled, leading NaNs kept. JIT-compatible and
+        differentiable (no dynamic shapes)."""
         if method != "linear":
             raise ValueError(f"Only 'linear' interpolation supported, got {method!r}")
-
-        def _interp_block(block):
-            n = block.shape[0]
-            idx = jnp.arange(n, dtype=jnp.float32)
-            result = block.copy()
-            for c in range(block.shape[1]):
-                col = block[:, c]
-                valid = jnp.isfinite(col)
-                # If all valid or all NaN, skip
-                n_valid = jnp.sum(valid)
-                # Use jnp.interp for linear interpolation
-                valid_idx = jnp.where(valid, idx, jnp.nan)
-                valid_vals = jnp.where(valid, col, jnp.nan)
-                # Compact valid values
-                order = jnp.argsort(~valid)  # valid first
-                sorted_idx = valid_idx[order][:n_valid]
-                sorted_vals = valid_vals[order][:n_valid]
-                interped = jnp.interp(idx, sorted_idx, sorted_vals)
-                result = result.at[:, c].set(jnp.where(n_valid > 0, interped, col))
-            return result
-
-        return self._apply_blockwise(_interp_block)
+        return self._apply_blockwise(lambda b: _interpolate_array(b, axis=0))
 
     def pivot_table(self, values=None, index=None, columns=None, aggfunc="mean"):
         """Create pivot table. Delegates to pandas (not JIT-compatible)."""
@@ -3188,27 +3135,26 @@ class DataFrame:
         if not self._dtype_blocks:
             raise ValueError("No numeric columns for mask operation")
 
+        result_data = {}
+        cols = []
         if isinstance(condition, DataFrame):
-            # Apply mask column by column
-            result_data = {}
+            # Apply mask column by column (JIT-safe: no __init__ reconstruction)
             for col in self._column_order:
                 if col in self._column_to_block and col in condition._column_to_block:
                     col_data = self._get_column_data(col)
-                    cond_data = condition._get_column_data(col)
-                    # Convert condition to boolean (handles 0/1 as int/float from comparisons)
-                    cond_bool = cond_data.astype(bool)
+                    cond_bool = condition._get_column_data(col).astype(bool)
                     # mask is inverse of where: replace where condition is True
                     result_data[col] = jnp.where(~cond_bool, col_data, fill_value)
-            return DataFrame(result_data, index=self._index.copy())
+                    cols.append(col)
         else:
             # Scalar or array condition - apply to all columns
             mask = jnp.asarray(condition).astype(bool)
-            result_data = {}
             for col in self._column_order:
                 if col in self._column_to_block:
                     col_data = self._get_column_data(col)
                     result_data[col] = jnp.where(~mask, col_data, fill_value)
-            return DataFrame(result_data, index=self._index.copy())
+                    cols.append(col)
+        return DataFrame._from_column_arrays(result_data, cols, self._index)
 
     def clip(self, lower=None, upper=None):
         """

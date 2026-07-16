@@ -71,28 +71,33 @@ Pandas vs jaxframe (eager and JIT) at various data sizes. JaxFrame+JIT should be
 
 ## Non-Differentiable Operations
 
-All ops are JIT-compatible. The following are **not** differentiable (`jax.grad`), with reasons:
+Nearly everything is JIT-compatible AND differentiable. `jax.grad` follows the
+JAX convention: subgradients at non-smooth points (min/max/sort/top-k), grads
+flow through gathers/permutations. The remaining non-differentiable ops are
+those whose output is not real-valued or whose gradient is zero a.e.:
 
 | Operation | Reason |
 |-----------|--------|
-| `min`, `max` | Non-smooth (gradient undefined at argmin/argmax) |
-| `median`, `quantile` | Non-smooth (sort-based, gradient undefined at boundaries) |
-| `isna`, `notna`, `isnull`, `notnull` | Boolean output — not a real-valued function |
-| `count` | Integer output (sum of booleans) — not real-valued |
-| `sort_values`, `nlargest`, `nsmallest` | Eager np.argsort (structure discovery) — not JIT or grad compatible |
-| `rank` | Eager np.argsort (structure discovery) — not JIT or grad compatible |
-| `groupby.min`, `groupby.max` | Same as min/max — non-smooth |
-| `groupby.count` | Same as count — integer output |
+| `isna`, `notna`, `isnull`, `notnull`, `isin`, `all`, `any`, comparisons (`eq`,`ne`,`lt`,`le`,`gt`,`ge`) | Boolean output — not a real-valued function |
+| `count`, `nunique`, `argsort`, `argmin`, `argmax`, `idxmin`, `idxmax`, `searchsorted` | Integer/discrete output |
+| `rank` | Step function — gradient is zero a.e. |
+| `round` | Step function — gradient is zero a.e. |
+| `astype` | Discrete type conversion |
 | `groupby.prod` | JAX limitation: `scatter_mul` gradients require `unique_indices=True` |
-| `groupby.first`, `groupby.last` | Index-based gather via segment_min/max on indices — discrete |
-| `all`, `any` | Boolean output — not a real-valued function |
-| `round` | Step function — gradient is zero almost everywhere |
-| `idxmin`, `idxmax` | Discrete (argmin/argmax) — not differentiable |
-| `isin` | Boolean output — not a real-valued function |
+| `groupby.count` | Integer output |
 
-Everything else (sum, mean, std, var, arithmetic, clip, where, fillna, cumsum, cumprod, shift, apply, reverse ops, groupby.sum/mean/std/var, transform) **is differentiable**.
+Everything else — including `min`/`max`/`median`/`quantile` (subgradient /
+interpolation weights), `sort_values`/`nlargest`/`nsmallest` (grad through the
+gather), `ffill`/`bfill`/`interpolate`, `cummax`/`cummin`, rolling/expanding
+min/max, `groupby.min/max/first/last` — **is differentiable**.
 
-When adding new ops, update this table. If an op is non-differentiable, document why.
+Eager-only ops (not JIT-compatible, by necessity): shape-changers
+(`dropna`, `drop_duplicates`, `query`, boolean-mask indexing, `merge`/`join`
+structure discovery) and unique-based ops (`unique`, `value_counts`, `mode`,
+`nunique`, `factorize`, `duplicated`, `groupby` discovery). Their *data paths*
+still use JAX gathers, so downstream compute stays on-device.
+
+When adding new ops, update this table and `_JAX_COMPAT` in dataframe.py.
 
 ## Roadmap
 

@@ -1326,8 +1326,13 @@ def test_jax_info_query():
 
     result = jax_info("min")
     assert result["jit"] is True
+    assert result["grad"] is True
+    assert "Subgradient" in result["reason"]
+
+    result = jax_info("rank")
+    assert result["jit"] is True
     assert result["grad"] is False
-    assert "Non-smooth" in result["reason"]
+    assert "zero" in result["reason"]
 
     result = jax_info("to_csv")
     assert result["jit"] is False

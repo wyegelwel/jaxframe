@@ -36,7 +36,7 @@ def assert_frame_equiv(pd_result, jf_result, rtol=1e-5):
         pd_vals = pd_result.values.astype(np.float32)
         jf_vals = np.asarray(jf_result.values if hasattr(jf_result, "values") else jf_result._data)
         assert_allclose(jf_vals, pd_vals, rtol=rtol)
-    elif isinstance(pd_result, (int, float, np.number)):
+    elif isinstance(pd_result, int | float | np.number):
         assert_allclose(float(jf_result), float(pd_result), rtol=rtol)
     else:
         assert_allclose(np.asarray(jf_result), np.asarray(pd_result), rtol=rtol)

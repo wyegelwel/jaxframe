@@ -35,6 +35,7 @@ NOT_PLANNED = {
         "droplevel": "MultiIndex out of scope",
         "reorder_levels": "MultiIndex out of scope",
         "swaplevel": "MultiIndex out of scope",
+        "resample": "DatetimeIndex resampling machinery out of scope",
     },
     "Series": {
         "sparse": "sparse extension arrays are out of scope",
@@ -52,6 +53,8 @@ NOT_PLANNED = {
         "droplevel": "MultiIndex out of scope",
         "reorder_levels": "MultiIndex out of scope",
         "swaplevel": "MultiIndex out of scope",
+        "resample": "DatetimeIndex resampling machinery out of scope",
+        "unstack": "requires MultiIndex — out of scope",
     },
 }
 

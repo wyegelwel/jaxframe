@@ -1788,13 +1788,22 @@ class DataFrame:
     # ========================================
 
     def apply(self, func, axis=0):
-        """Apply function along axis. JIT-compatible if func is JIT-compatible."""
+        """Apply function along axis. JIT-compatible if func is JIT-compatible.
+
+        Reductions return a Series; shape-preserving functions return a
+        DataFrame (pandas semantics)."""
         data = self.values
         if axis == 0:
-            # Apply func to each column -> Series
+            # Apply func to each column
             results = []
             for i in range(data.shape[1]):
                 results.append(func(data[:, i]))
+            if all(hasattr(r, "shape") and r.shape == (data.shape[0],) for r in results):
+                return DataFrame._from_column_arrays(
+                    dict(zip(self._numeric_cols, results)),
+                    list(self._numeric_cols),
+                    self._index,
+                )
             return Series(
                 jnp.array(results),
                 index=np.array(self._numeric_cols),
@@ -1885,9 +1894,16 @@ class DataFrame:
             if col not in left_on and col in right_non_key:
                 out_col = col + left_suffix
             if col in self._column_to_block:
-                result_data[out_col] = self._get_column_data(col)[left_idx]
+                gathered = _gather_rows_nanfill(self._get_column_data(col), left_idx)
+                # Shared key column: coalesce from right for right-only rows
+                if col in left_on and col in right_on and col in right._column_to_block:
+                    right_gathered = _gather_rows_nanfill(right._get_column_data(col), right_idx)
+                    gathered = jnp.where(
+                        jnp.asarray(np.asarray(left_idx) < 0), right_gathered, gathered
+                    )
+                result_data[out_col] = gathered
             elif col in self._object_data:
-                result_data[out_col] = self._object_data[col][left_idx]
+                result_data[out_col] = _gather_rows_nanfill(self._object_data[col], left_idx)
 
         # Columns from right (skip shared key)
         for col in right._column_order:
@@ -1897,9 +1913,9 @@ class DataFrame:
             if col not in right_on and col in left_non_key:
                 out_col = col + right_suffix
             if col in right._column_to_block:
-                result_data[out_col] = right._get_column_data(col)[right_idx]
+                result_data[out_col] = _gather_rows_nanfill(right._get_column_data(col), right_idx)
             elif col in right._object_data:
-                result_data[out_col] = right._object_data[col][right_idx]
+                result_data[out_col] = _gather_rows_nanfill(right._object_data[col], right_idx)
 
         return DataFrame(result_data)
 
@@ -1976,6 +1992,903 @@ class DataFrame:
     # ========================================
     # Pandas interop & copy
     # ========================================
+
+    # ========================================
+    # Named arithmetic / comparisons (pandas parity)
+    # ========================================
+
+    def add(self, other, axis="columns", fill_value=None):
+        """Elementwise addition (JIT-compatible, differentiable)."""
+        return self._apply_elementwise(other, jnp.add, "add")
+
+    radd = add
+
+    def sub(self, other, axis="columns", fill_value=None):
+        """Elementwise subtraction (JIT-compatible, differentiable)."""
+        return self._apply_elementwise(other, jnp.subtract, "sub")
+
+    subtract = sub
+
+    def rsub(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, lambda a, b: b - a, "rsub")
+
+    def mul(self, other, axis="columns", fill_value=None):
+        """Elementwise multiplication (JIT-compatible, differentiable)."""
+        return self._apply_elementwise(other, jnp.multiply, "mul")
+
+    multiply = mul
+    rmul = mul
+
+    def div(self, other, axis="columns", fill_value=None):
+        """Elementwise division (JIT-compatible, differentiable)."""
+        return self._apply_elementwise(other, jnp.true_divide, "div")
+
+    divide = div
+    truediv = div
+
+    def rdiv(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, lambda a, b: b / a, "rdiv")
+
+    rtruediv = rdiv
+
+    def floordiv(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, jnp.floor_divide, "floordiv")
+
+    def rfloordiv(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, lambda a, b: b // a, "rfloordiv")
+
+    def mod(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, jnp.mod, "mod")
+
+    def rmod(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, lambda a, b: b % a, "rmod")
+
+    def pow(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, jnp.power, "pow")
+
+    def rpow(self, other, axis="columns", fill_value=None):
+        return self._apply_elementwise(other, lambda a, b: b**a, "rpow")
+
+    product = prod
+
+    def dot(self, other):
+        """Matrix multiplication (JIT-compatible, differentiable)."""
+        return self @ other
+
+    def eq(self, other, axis="columns"):
+        """Elementwise equality (JIT-compatible, boolean output)."""
+        return self._apply_comparison(other, jnp.equal, "eq")
+
+    def ne(self, other, axis="columns"):
+        return self._apply_comparison(other, jnp.not_equal, "ne")
+
+    def lt(self, other, axis="columns"):
+        return self._apply_comparison(other, jnp.less, "lt")
+
+    def le(self, other, axis="columns"):
+        return self._apply_comparison(other, jnp.less_equal, "le")
+
+    def gt(self, other, axis="columns"):
+        return self._apply_comparison(other, jnp.greater, "gt")
+
+    def ge(self, other, axis="columns"):
+        return self._apply_comparison(other, jnp.greater_equal, "ge")
+
+    # ========================================
+    # Cumulative / missing-data ops
+    # ========================================
+
+    def cummax(self, axis: int = 0, skipna=True):
+        """Cumulative max, pandas NaN semantics (JIT-compatible)."""
+        return self._apply_blockwise(lambda b: _cummax_pandas(b, axis=0))
+
+    def cummin(self, axis: int = 0, skipna=True):
+        """Cumulative min, pandas NaN semantics (JIT-compatible)."""
+        return self._apply_blockwise(lambda b: _cummin_pandas(b, axis=0))
+
+    def ffill(self, axis: int = 0):
+        """Forward-fill NaNs down each column (JIT-compatible, differentiable)."""
+        return self._apply_blockwise(lambda b: _ffill_array(b, axis=0))
+
+    pad = ffill
+
+    def bfill(self, axis: int = 0):
+        """Backward-fill NaNs down each column (JIT-compatible, differentiable)."""
+        return self._apply_blockwise(lambda b: _bfill_array(b, axis=0))
+
+    backfill = bfill
+
+    def dropna(self, axis: int = 0, how="any", subset=None):
+        """Drop rows (axis=0) or columns (axis=1) containing NaN. Eager (shape change)."""
+        if axis == 1:
+            keep = [
+                col
+                for col in self._column_order
+                if col in self._object_data or not bool(jnp.isnan(self._get_column_data(col)).any())
+            ]
+            return self[keep]
+        cols = (
+            subset
+            if subset is not None
+            else [c for c in self._column_order if c in self._column_to_block]
+        )
+        masks = [np.isnan(np.asarray(self._get_column_data(c))) for c in cols]
+        if not masks:
+            return self.copy()
+        stacked = np.stack(masks, axis=1)
+        bad = stacked.any(axis=1) if how == "any" else stacked.all(axis=1)
+        pos = np.flatnonzero(~bad)
+        return self.take(pos)
+
+    def first_valid_index(self):
+        """First index label with any non-NaN value. Eager."""
+        valid = ~np.isnan(np.asarray(self._numeric_data)).all(axis=1)
+        pos = np.flatnonzero(valid)
+        return self._index[pos[0]] if len(pos) else None
+
+    def last_valid_index(self):
+        """Last index label with any non-NaN value. Eager."""
+        valid = ~np.isnan(np.asarray(self._numeric_data)).all(axis=1)
+        pos = np.flatnonzero(valid)
+        return self._index[pos[-1]] if len(pos) else None
+
+    def asof(self, where):
+        """Per-column last non-NaN value at index <= where. Eager."""
+        mask = self._index <= where
+        vals = {}
+        for col in self._numeric_cols:
+            arr = np.asarray(self._get_column_data(col))
+            valid = np.flatnonzero(mask & ~np.isnan(arr))
+            vals[col] = arr[valid[-1]] if len(valid) else np.nan
+        return Series(
+            jnp.asarray(list(vals.values())), index=np.asarray(list(vals.keys())), name=where
+        )
+
+    # ========================================
+    # Function application
+    # ========================================
+
+    def agg(self, func=None, axis=0):
+        """Aggregate by name, callable, list, or {column: func} dict."""
+        if isinstance(func, str):
+            return getattr(self, func)()
+        if isinstance(func, dict):
+            results = {}
+            for col, f in func.items():
+                s = self[col]
+                results[col] = s.agg(f) if not isinstance(f, list | tuple) else s.agg(list(f))
+            scalars = {c: v for c, v in results.items() if not isinstance(v, Series)}
+            if len(scalars) == len(results):
+                return Series(
+                    jnp.stack([jnp.asarray(v, dtype=jnp.float32) for v in scalars.values()]),
+                    index=np.asarray(list(scalars.keys())),
+                )
+            return results
+        if isinstance(func, list | tuple):
+            rows = {}
+            for f in func:
+                fname = f if isinstance(f, str) else getattr(f, "__name__", str(f))
+                s = getattr(self, f)() if isinstance(f, str) else self.apply(f)
+                rows[fname] = {c: s[c] for c in s.index.tolist()} if isinstance(s, Series) else {}
+            cols = list(self._numeric_cols)
+            data = {c: [float(rows[fn].get(c, np.nan)) for fn in rows] for c in cols}
+            return DataFrame(data, index=np.asarray(list(rows.keys())))
+        return func(self)
+
+    aggregate = agg
+
+    def transform(self, func, axis=0):
+        """Apply a shape-preserving function columnwise (JIT-compatible if func is)."""
+        if isinstance(func, str):
+            result = getattr(self, func)()
+        else:
+            new_cols = {}
+            for col in self._numeric_cols:
+                res = func(self._get_column_data(col))
+                new_cols[col] = res._data if isinstance(res, Series) else res
+            result = DataFrame._from_column_arrays(new_cols, list(self._numeric_cols), self._index)
+        if isinstance(result, DataFrame) and result.shape[0] == self.shape[0]:
+            return result
+        raise ValueError("transform must return a result with the same shape")
+
+    def map(self, func, na_action=None):
+        """Apply func elementwise to every value (JIT-compatible when func is
+        vectorizable over arrays; falls back to eager loop)."""
+        try:
+            return self._apply_blockwise(func)
+        except Exception:
+            new_cols = {}
+            for col in self._column_order:
+                arr = np.asarray(self._get_column_data(col))
+                new_cols[col] = np.asarray([func(v) for v in arr])
+            return DataFrame(new_cols, index=self._index)
+
+    # ========================================
+    # Selection / structure
+    # ========================================
+
+    @property
+    def loc(self):
+        """Label-based indexing (eager)."""
+        return _DataFrameLocIndexer(self)
+
+    @property
+    def at(self):
+        """Fast label-based scalar access (eager)."""
+        return _DataFrameAtIndexer(self)
+
+    @property
+    def iat(self):
+        """Fast integer-position scalar access (eager)."""
+        return _DataFrameIatIndexer(self)
+
+    @property
+    def axes(self):
+        return [self._index, self._column_order]
+
+    @property
+    def attrs(self) -> dict:
+        if "_attrs" not in self.__dict__:
+            self.__dict__["_attrs"] = {}
+        return self.__dict__["_attrs"]
+
+    @attrs.setter
+    def attrs(self, value):
+        self.__dict__["_attrs"] = dict(value)
+
+    @property
+    def flags(self):
+        return _Flags()
+
+    def set_flags(self, **kwargs):
+        """Return a copy (flags are unused by jaxframe)."""
+        return self.copy()
+
+    def keys(self):
+        return self._column_order
+
+    def items(self):
+        """Iterate over (column, Series) pairs (eager)."""
+        for col in self._column_order:
+            yield col, self[col]
+
+    def iterrows(self):
+        """Iterate over (label, row Series) pairs. Eager."""
+        arrays = {col: np.asarray(self._get_column_data(col)) for col in self._column_to_block}
+        arrays.update({col: arr for col, arr in self._object_data.items()})
+        cols = np.asarray(self._column_order)
+        for i, label in enumerate(self._index):
+            row = np.asarray([arrays[c][i] for c in self._column_order])
+            yield label, Series(row, index=cols)
+
+    def itertuples(self, index=True, name="Pandas"):
+        """Iterate over rows as namedtuples. Eager."""
+        import collections
+
+        fields = (["Index"] if index else []) + [str(c) for c in self._column_order]
+        Row = collections.namedtuple(name, fields, rename=True)
+        arrays = {col: np.asarray(self._get_column_data(col)) for col in self._column_to_block}
+        arrays.update({col: arr for col, arr in self._object_data.items()})
+        for i, label in enumerate(self._index):
+            vals = [arrays[c][i] for c in self._column_order]
+            yield Row(*(([label] if index else []) + vals))
+
+    def get(self, key, default=None):
+        """Column by name, or default."""
+        try:
+            return self[key]
+        except (KeyError, TypeError):
+            return default
+
+    def xs(self, key, axis=0):
+        """Row by index label (axis=0) or column (axis=1). Eager."""
+        if axis == 1:
+            return self[key]
+        pos = np.flatnonzero(self._index == key)
+        if len(pos) == 0:
+            raise KeyError(key)
+        return self.iloc[int(pos[0])]
+
+    def take(self, indices, axis: int = 0):
+        """Gather rows (axis=0) or columns (axis=1) by position.
+        JIT-compatible for axis=0 (gather; grad flows)."""
+        if axis == 1:
+            return self[[self._column_order[int(i)] for i in np.asarray(indices)]]
+        idx = jnp.asarray(indices)
+        new_blocks = {dt: jnp.take(block, idx, axis=0) for dt, block in self._dtype_blocks.items()}
+        if _is_tracer(idx):
+            new_index, new_obj = self._index, self._object_data
+        else:
+            pos = np.asarray(indices)
+            new_index = self._index[pos]
+            new_obj = {k: v[pos] for k, v in self._object_data.items()}
+        return DataFrame._from_parts(
+            dtype_blocks=new_blocks,
+            column_to_block=dict(self._column_to_block),
+            object_data=new_obj,
+            index=new_index,
+            column_order=list(self._column_order),
+        )
+
+    def sample(self, n=None, frac=None, replace=False, random_state=None, axis=0):
+        """Random row sample. Eager, not differentiable."""
+        rng = np.random.default_rng(random_state)
+        if n is None:
+            n = int(round((frac if frac is not None else 1.0) * len(self)))
+        pos = rng.choice(len(self), size=n, replace=replace)
+        return self.take(pos)
+
+    def filter(self, items=None, like=None, regex=None, axis=1):
+        """Filter columns (axis=1) or index labels (axis=0). Eager."""
+        if axis == 0:
+            labels = self._index
+            if items is not None:
+                mask = np.isin(labels, np.asarray(items))
+            elif like is not None:
+                mask = np.array([like in str(x) for x in labels])
+            else:
+                import re
+
+                pat = re.compile(regex)
+                mask = np.array([bool(pat.search(str(x))) for x in labels])
+            return self.take(np.flatnonzero(mask))
+        cols = self._column_order
+        if items is not None:
+            keep = [c for c in cols if c in set(items)]
+        elif like is not None:
+            keep = [c for c in cols if like in str(c)]
+        else:
+            import re
+
+            pat = re.compile(regex)
+            keep = [c for c in cols if pat.search(str(c))]
+        return self[keep]
+
+    def squeeze(self, axis=None):
+        """Collapse a 1-column frame to a Series (and 1x1 to a scalar)."""
+        if len(self._column_order) == 1:
+            s = self[self._column_order[0]]
+            if len(s) == 1:
+                return s._data[0]
+            return s
+        return self
+
+    def truncate(self, before=None, after=None):
+        """Keep rows with index label in [before, after]. Eager."""
+        mask = np.ones(len(self._index), dtype=bool)
+        if before is not None:
+            mask &= self._index >= before
+        if after is not None:
+            mask &= self._index <= after
+        return self.take(np.flatnonzero(mask))
+
+    def add_prefix(self, prefix: str):
+        """Prefix all column names."""
+        return self.rename(columns={c: f"{prefix}{c}" for c in self._column_order})
+
+    def add_suffix(self, suffix: str):
+        """Suffix all column names."""
+        return self.rename(columns={c: f"{c}{suffix}" for c in self._column_order})
+
+    def rename_axis(self, mapper=None, **kwargs):
+        """No-op copy (axis names are not tracked)."""
+        return self.copy()
+
+    def set_axis(self, labels, axis=0):
+        """Replace the index (axis=0) or column names (axis=1)."""
+        if axis in (1, "columns"):
+            return self.rename(columns=dict(zip(self._column_order, labels)))
+        return self._replace_index(np.asarray(labels))
+
+    def reindex(self, index=None, columns=None, fill_value=jnp.nan):
+        """Conform to new index labels/columns; missing entries get fill_value. Eager."""
+        result = self
+        if columns is not None:
+            data = {}
+            for col in columns:
+                if col in result._column_order:
+                    data[col] = np.asarray(result._get_column_data(col))
+                else:
+                    data[col] = np.full(len(result), np.nan)
+            result = DataFrame(data, index=result._index)
+        if index is not None:
+            new_index = np.asarray(index)
+            lookup = {label: i for i, label in enumerate(result._index.tolist())}
+            pos = np.array([lookup.get(label, -1) for label in new_index.tolist()])
+            gathered = result.take(np.maximum(pos, 0))
+            missing = jnp.asarray(pos < 0)[:, None]
+            new_blocks = {
+                dt: jnp.where(missing, fill_value, block)
+                for dt, block in gathered._dtype_blocks.items()
+            }
+            result = DataFrame._from_parts(
+                dtype_blocks=new_blocks,
+                column_to_block=dict(gathered._column_to_block),
+                object_data=gathered._object_data,
+                index=new_index,
+                column_order=list(gathered._column_order),
+            )
+        return result
+
+    def reindex_like(self, other, fill_value=jnp.nan):
+        """Conform to another DataFrame's index and columns. Eager."""
+        return self.reindex(index=other._index, columns=other._column_order, fill_value=fill_value)
+
+    # ========================================
+    # Mutating column ops (pandas parity)
+    # ========================================
+
+    def _replace_self(self, df: "DataFrame"):
+        self._dtype_blocks = df._dtype_blocks
+        self._column_to_block = df._column_to_block
+        self._object_data = df._object_data
+        self._index = df._index
+        self._column_order = df._column_order
+
+    def __setitem__(self, key, value):
+        """Add or replace a column. Eager, mutates self."""
+        if not isinstance(key, str):
+            raise TypeError(f"column key must be str, got {type(key)}")
+        if isinstance(value, Series):
+            value = value._data
+        elif isinstance(value, DataFrame):
+            value = value._get_column_data(value._column_order[0])
+        elif np.isscalar(value) or value is None:
+            value = np.full(len(self), value)
+        self._replace_self(self.assign(**{key: value}))
+
+    def insert(self, loc: int, column, value):
+        """Insert a column at position loc. Eager, mutates self."""
+        if isinstance(value, Series):
+            value = value._data
+        new_df = self.assign(**{column: value})
+        order = [c for c in new_df._column_order if c != column]
+        order.insert(loc, column)
+        reordered = new_df[order]
+        self._replace_self(reordered)
+
+    def isetitem(self, loc: int, value):
+        """Set column by position. Eager, mutates self."""
+        self[self._column_order[loc]] = value
+
+    def pop(self, item):
+        """Remove a column and return it as a Series. Eager, mutates self."""
+        s = self[item]
+        self._replace_self(self.drop(columns=[item]))
+        return s
+
+    def update(self, other: "DataFrame"):
+        """Overwrite with non-NaN values from other (shared columns). Mutates self."""
+        new = {}
+        for col in self._column_order:
+            if col in other._column_order and col in self._column_to_block:
+                a = self._get_column_data(col)
+                b = other._get_column_data(col)
+                new[col] = jnp.where(jnp.isnan(b), a, b)
+        result = self.assign(**new)
+        self._replace_self(result)
+
+    # ========================================
+    # Combining / comparing
+    # ========================================
+
+    def join(self, other: "DataFrame", on=None, how="left", lsuffix="", rsuffix=""):
+        """Join on index (or a key column with on=). Eager structure discovery,
+        JIT-compatible gathers via merge."""
+        index_col = "__jaxframe_join_index__"
+        right = other.copy()
+        right_data = {index_col: np.asarray(other._index)}
+        for col in other._column_order:
+            arr = (
+                other._get_column_data(col)
+                if col in other._column_to_block
+                else other._object_data[col]
+            )
+            right_data[col] = np.asarray(arr)
+        right = DataFrame(right_data)
+        if on is not None:
+            left = self.copy()
+            merged = left.merge(
+                right,
+                left_on=on,
+                right_on=index_col,
+                how=how,
+                suffixes=(lsuffix or "_x", rsuffix or "_y"),
+            )
+        else:
+            left_data = {index_col: np.asarray(self._index)}
+            for col in self._column_order:
+                arr = (
+                    self._get_column_data(col)
+                    if col in self._column_to_block
+                    else self._object_data[col]
+                )
+                left_data[col] = np.asarray(arr)
+            left = DataFrame(left_data)
+            merged = left.merge(
+                right, on=index_col, how=how, suffixes=(lsuffix or "_x", rsuffix or "_y")
+            )
+        keep = [c for c in merged._column_order if c != index_col]
+        return merged[keep]
+
+    def align(self, other: "DataFrame", join="outer", axis=None, fill_value=jnp.nan):
+        """Align two frames on index and columns. Eager."""
+        if join == "outer":
+            idx = np.union1d(self._index, other._index)
+            cols = sorted(set(self._column_order) | set(other._column_order), key=str)
+        elif join == "inner":
+            idx = np.intersect1d(self._index, other._index)
+            cols = [c for c in self._column_order if c in set(other._column_order)]
+        elif join == "left":
+            idx, cols = self._index, list(self._column_order)
+        else:
+            idx, cols = other._index, list(other._column_order)
+        return (
+            self.reindex(index=idx, columns=cols, fill_value=fill_value),
+            other.reindex(index=idx, columns=cols, fill_value=fill_value),
+        )
+
+    def combine(self, other: "DataFrame", func, fill_value=None):
+        """Combine columnwise with another frame via func."""
+        cols = sorted(set(self._column_order) | set(other._column_order), key=str)
+        data = {}
+        for col in cols:
+            if col in self._column_order and col in other._column_order:
+                a, b = self._get_column_data(col), other._get_column_data(col)
+                if fill_value is not None:
+                    a = jnp.where(jnp.isnan(a), fill_value, a)
+                    b = jnp.where(jnp.isnan(b), fill_value, b)
+                result = func(Series(a), Series(b))
+                data[col] = result._data if isinstance(result, Series) else result
+            elif col in self._column_order:
+                data[col] = self._get_column_data(col)
+            else:
+                data[col] = other._get_column_data(col)
+        return DataFrame({c: np.asarray(v) for c, v in data.items()}, index=self._index)
+
+    def combine_first(self, other: "DataFrame"):
+        """Fill NaNs from other, union of columns (JIT-compatible data path)."""
+        return self.combine(
+            other, lambda a, b: Series(jnp.where(jnp.isnan(a._data), b._data, a._data))
+        )
+
+    def corrwith(self, other, axis=0):
+        """Pairwise Pearson correlation with matching columns of other."""
+        if isinstance(other, Series):
+            cols = list(self._numeric_cols)
+            vals = [_nan_pearson(self._get_column_data(c), other._data) for c in cols]
+        else:
+            cols = [c for c in self._numeric_cols if c in set(other._column_order)]
+            vals = [_nan_pearson(self._get_column_data(c), other._get_column_data(c)) for c in cols]
+        return Series(jnp.stack(vals), index=np.asarray(cols))
+
+    def equals(self, other) -> bool:
+        """Exact equality including NaN positions. Eager."""
+        if not isinstance(other, DataFrame):
+            return False
+        if list(self._column_order) != list(other._column_order) or self.shape != other.shape:
+            return False
+        for col in self._column_order:
+            a = np.asarray(
+                self._get_column_data(col)
+                if col in self._column_to_block
+                else self._object_data[col]
+            )
+            b = np.asarray(
+                other._get_column_data(col)
+                if col in other._column_to_block
+                else other._object_data[col]
+            )
+            try:
+                if not np.array_equal(a, b, equal_nan=True):
+                    return False
+            except TypeError:
+                if not np.array_equal(a, b):
+                    return False
+        return True
+
+    def compare(self, other: "DataFrame"):
+        """Cells that differ, as a frame with <col>_self/<col>_other columns. Eager."""
+        diff_rows = np.zeros(len(self), dtype=bool)
+        for col in self._numeric_cols:
+            a = np.asarray(self._get_column_data(col))
+            b = np.asarray(other._get_column_data(col))
+            diff_rows |= ~((a == b) | (np.isnan(a) & np.isnan(b)))
+        pos = np.flatnonzero(diff_rows)
+        data = {}
+        for col in self._numeric_cols:
+            a = np.asarray(self._get_column_data(col))[pos]
+            b = np.asarray(other._get_column_data(col))[pos]
+            cell_diff = ~((a == b) | (np.isnan(a) & np.isnan(b)))
+            data[f"{col}_self"] = np.where(cell_diff, a, np.nan)
+            data[f"{col}_other"] = np.where(cell_diff, b, np.nan)
+        return DataFrame(data, index=self._index[pos])
+
+    def replace(self, to_replace, value=None):
+        """Replace values (scalar or {old: new} dict). JIT-compatible data path."""
+        if isinstance(to_replace, dict):
+            pairs = list(to_replace.items())
+        else:
+            pairs = [(to_replace, value)]
+
+        def _replace_block(block):
+            out = block
+            for old, new in pairs:
+                out = jnp.where(out == old, new, out)
+            return out
+
+        return self._apply_blockwise(_replace_block)
+
+    # ========================================
+    # Reshaping
+    # ========================================
+
+    def stack(self, level=-1):
+        """Stack columns into a Series with (row, col) tuple index. Eager."""
+        vals, labels = [], []
+        for i, label in enumerate(self._index):
+            for col in self._column_order:
+                vals.append(float(np.asarray(self._get_column_data(col))[i]))
+                labels.append((label, col))
+        return Series(jnp.asarray(vals), index=np.asarray(labels, dtype=object), name=None)
+
+    def unstack(self, level=-1):
+        """Unstack into a Series with (col, row) tuple index. Eager."""
+        vals, labels = [], []
+        for col in self._column_order:
+            arr = np.asarray(self._get_column_data(col))
+            for i, label in enumerate(self._index):
+                vals.append(float(arr[i]))
+                labels.append((col, label))
+        return Series(jnp.asarray(vals), index=np.asarray(labels, dtype=object), name=None)
+
+    def _column_values(self, col) -> np.ndarray:
+        """Numeric or object column as a numpy array (eager helper)."""
+        if col in self._column_to_block:
+            return np.asarray(self._get_column_data(col))
+        return np.asarray(self._object_data[col])
+
+    def pivot(self, columns=None, index=None, values=None):
+        """Reshape by unique column values. Eager (structure discovery)."""
+        col_keys = self._column_values(columns)
+        idx_vals = self._column_values(index) if index is not None else np.asarray(self._index)
+        val_cols = (
+            values
+            if values is not None
+            else [c for c in self._column_order if c not in (columns, index)]
+        )
+        if isinstance(val_cols, str):
+            val_cols = [val_cols]
+        uniq_cols = np.unique(col_keys)
+        uniq_idx = np.unique(idx_vals)
+        data = {}
+        for vc in val_cols:
+            src = np.asarray(self._get_column_data(vc))
+            for uc in uniq_cols:
+                out = np.full(len(uniq_idx), np.nan)
+                sel = col_keys == uc
+                row_pos = np.searchsorted(uniq_idx, idx_vals[sel])
+                out[row_pos] = src[sel]
+                name = uc if len(val_cols) == 1 else f"{vc}_{uc}"
+                data[str(name)] = out
+        return DataFrame(data, index=uniq_idx)
+
+    def explode(self, column, ignore_index=False):
+        """Flatten a list-valued object column into rows. Eager."""
+        arr = self._object_data[column]
+        counts = [len(v) if isinstance(v, list | tuple | np.ndarray) else 1 for v in arr]
+        row_pos = np.repeat(np.arange(len(arr)), counts)
+        exploded = []
+        for v in arr:
+            if isinstance(v, list | tuple | np.ndarray):
+                exploded.extend(v)
+            else:
+                exploded.append(v)
+        base = self.take(row_pos)
+        data = {}
+        for col in self._column_order:
+            if col == column:
+                data[col] = np.asarray(exploded, dtype=object)
+            elif col in base._column_to_block:
+                data[col] = np.asarray(base._get_column_data(col))
+            else:
+                data[col] = base._object_data[col]
+        index = np.arange(len(row_pos)) if ignore_index else self._index[row_pos]
+        return DataFrame(data, index=index)
+
+    def value_counts(self, subset=None, sort=True, ascending=False, dropna=True):
+        """Count unique rows. Eager (structure discovery)."""
+        cols = subset if subset is not None else list(self._column_order)
+        arrays = [np.asarray(self._get_column_data(c)) for c in cols]
+        rows = np.stack(arrays, axis=1)
+        if dropna:
+            rows = rows[~np.isnan(rows).any(axis=1)]
+        uniq, counts = np.unique(rows, axis=0, return_counts=True)
+        if sort:
+            order = np.argsort(counts if ascending else -counts, kind="stable")
+            uniq, counts = uniq[order], counts[order]
+        labels = np.asarray([tuple(r) for r in uniq], dtype=object) if len(cols) > 1 else uniq[:, 0]
+        return Series(jnp.asarray(counts), index=labels, name="count")
+
+    # ========================================
+    # Expression evaluation
+    # ========================================
+
+    def _eval_env(self, local_dict=None):
+        env = {"jnp": jnp, "np": np, "abs": abs, "min": min, "max": max}
+        for col in self._column_order:
+            if str(col).isidentifier():
+                env[str(col)] = self[col]
+        if local_dict:
+            env.update(local_dict)
+        return env
+
+    def eval(self, expr: str, local_dict=None, **kwargs):
+        """Evaluate an expression over columns. Supports 'new_col = expr'
+        assignment form. JIT-compatible data path (Python-parsed, JAX ops)."""
+        expr = expr.strip()
+        # Assignment form (single =, not ==/<=/>=/!=)
+        import re
+
+        m = re.match(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.+)$", expr, re.DOTALL)
+        if m:
+            target, rhs = m.group(1), m.group(2)
+            result = eval(rhs, {"__builtins__": {}}, self._eval_env(local_dict))  # noqa: S307
+            value = result._data if isinstance(result, Series) else result
+            return self.assign(**{target: value})
+        result = eval(expr, {"__builtins__": {}}, self._eval_env(local_dict))  # noqa: S307
+        return result
+
+    def query(self, expr: str, local_dict=None, **kwargs):
+        """Filter rows by a boolean expression over columns. Eager (shape change)."""
+        result = eval(  # noqa: S307
+            expr, {"__builtins__": {}}, self._eval_env(local_dict)
+        )
+        mask = np.asarray(result._data if isinstance(result, Series) else result)
+        return self.take(np.flatnonzero(mask))
+
+    # ========================================
+    # Construction / conversion
+    # ========================================
+
+    @classmethod
+    def from_dict(cls, data, orient="columns"):
+        """Construct from a dict of columns (or rows with orient='index')."""
+        if orient == "columns":
+            return cls(dict(data))
+        if orient == "index":
+            rows = list(data.values())
+            index = np.asarray(list(data.keys()))
+            n_cols = len(rows[0])
+            cols = {i: np.asarray([r[i] for r in rows]) for i in range(n_cols)}
+            return cls({str(k): v for k, v in cols.items()}, index=index)
+        raise ValueError(f"orient must be 'columns' or 'index', got {orient!r}")
+
+    @classmethod
+    def from_records(cls, data, columns=None):
+        """Construct from a list of records (dicts or tuples)."""
+        if len(data) == 0:
+            return cls({})
+        first = data[0]
+        if isinstance(first, dict):
+            cols = columns if columns is not None else list(first.keys())
+            return cls({c: np.asarray([r.get(c) for r in data]) for c in cols})
+        n = len(first)
+        cols = columns if columns is not None else list(range(n))
+        return cls({str(c): np.asarray([r[i] for r in data]) for i, c in enumerate(cols)})
+
+    def to_dict(self, orient="dict"):
+        """Convert to dict. Supports 'dict', 'list', 'records' orients. Eager."""
+        cols = {
+            col: np.asarray(
+                self._get_column_data(col)
+                if col in self._column_to_block
+                else self._object_data[col]
+            ).tolist()
+            for col in self._column_order
+        }
+        if orient == "list":
+            return cols
+        if orient == "records":
+            return [{c: cols[c][i] for c in self._column_order} for i in range(len(self))]
+        return {c: dict(zip(self._index.tolist(), cols[c])) for c in self._column_order}
+
+    def to_records(self, index=True):
+        """Convert to a numpy record array. Eager."""
+        return self.to_pandas().to_records(index=index)
+
+    def memory_usage(self, index=True, deep=False):
+        """Bytes per column, as a Series."""
+        cols, sizes = [], []
+        if index:
+            cols.append("Index")
+            sizes.append(self._index.nbytes)
+        for col in self._column_order:
+            arr = np.asarray(
+                self._get_column_data(col)
+                if col in self._column_to_block
+                else self._object_data[col]
+            )
+            cols.append(col)
+            sizes.append(arr.nbytes)
+        return Series(jnp.asarray(sizes), index=np.asarray(cols))
+
+    def info(self, **kwargs):
+        """Print a concise summary (delegates to pandas)."""
+        return self.to_pandas().info(**kwargs)
+
+    def convert_dtypes(self):
+        """No-op copy (jaxframe already uses concrete dtypes)."""
+        return self.copy()
+
+    def infer_objects(self):
+        """No-op copy (jaxframe already uses concrete dtypes)."""
+        return self.copy()
+
+    def _delegate_pandas(self, method, *args, **kwargs):
+        return getattr(self.to_pandas(), method)(*args, **kwargs)
+
+    def to_json(self, *a, **k):
+        """Write JSON via pandas (eager I/O)."""
+        return self._delegate_pandas("to_json", *a, **k)
+
+    def to_html(self, *a, **k):
+        return self._delegate_pandas("to_html", *a, **k)
+
+    def to_string(self, *a, **k):
+        return self._delegate_pandas("to_string", *a, **k)
+
+    def to_markdown(self, *a, **k):
+        return self._delegate_pandas("to_markdown", *a, **k)
+
+    def to_latex(self, *a, **k):
+        return self._delegate_pandas("to_latex", *a, **k)
+
+    def to_excel(self, *a, **k):
+        return self._delegate_pandas("to_excel", *a, **k)
+
+    def to_parquet(self, *a, **k):
+        return self._delegate_pandas("to_parquet", *a, **k)
+
+    def to_feather(self, *a, **k):
+        return self._delegate_pandas("to_feather", *a, **k)
+
+    def to_pickle(self, *a, **k):
+        return self._delegate_pandas("to_pickle", *a, **k)
+
+    def to_sql(self, *a, **k):
+        return self._delegate_pandas("to_sql", *a, **k)
+
+    def to_hdf(self, *a, **k):
+        return self._delegate_pandas("to_hdf", *a, **k)
+
+    def to_stata(self, *a, **k):
+        return self._delegate_pandas("to_stata", *a, **k)
+
+    def to_orc(self, *a, **k):
+        return self._delegate_pandas("to_orc", *a, **k)
+
+    def to_xml(self, *a, **k):
+        return self._delegate_pandas("to_xml", *a, **k)
+
+    def to_clipboard(self, *a, **k):
+        return self._delegate_pandas("to_clipboard", *a, **k)
+
+    def to_xarray(self):
+        return self._delegate_pandas("to_xarray")
+
+    @property
+    def plot(self):
+        """Plotting accessor (delegates to pandas)."""
+        return self.to_pandas().plot
+
+    def hist(self, *a, **k):
+        """Histogram plot (delegates to pandas)."""
+        return self._delegate_pandas("hist", *a, **k)
+
+    def boxplot(self, *a, **k):
+        """Box plot (delegates to pandas)."""
+        return self._delegate_pandas("boxplot", *a, **k)
 
     def to_pandas(self):
         """Convert to pandas DataFrame."""
@@ -2916,6 +3829,85 @@ class _ILocIndexer:
                     index=new_index,
                     column_order=self._df._column_order,
                 )
+
+
+class _DataFrameLocIndexer:
+    """Label-based indexing for DataFrame (eager)."""
+
+    def __init__(self, df):
+        self._df = df
+
+    def _row_positions(self, key):
+        df = self._df
+        if isinstance(key, Series):
+            key = np.asarray(key._data)
+        if isinstance(key, np.ndarray | jnp.ndarray) and np.asarray(key).dtype == bool:
+            return np.flatnonzero(np.asarray(key)), False
+        if isinstance(key, slice):
+            if key.start is None and key.stop is None:
+                return np.arange(len(df._index)), False
+            start = 0 if key.start is None else int(np.flatnonzero(df._index == key.start)[0])
+            stop = (
+                len(df._index)
+                if key.stop is None
+                else int(np.flatnonzero(df._index == key.stop)[0]) + 1
+            )
+            return np.arange(start, stop), False
+        if isinstance(key, list | np.ndarray):
+            lookup = {label: i for i, label in enumerate(df._index.tolist())}
+            return np.array([lookup[k] for k in key]), False
+        pos = np.flatnonzero(df._index == key)
+        if len(pos) == 0:
+            raise KeyError(key)
+        return np.array([pos[0]]), True
+
+    def __getitem__(self, key):
+        df = self._df
+        col_key = None
+        if isinstance(key, tuple) and len(key) == 2:
+            key, col_key = key
+        pos, scalar_row = self._row_positions(key)
+        result = df.take(pos)
+        if col_key is not None:
+            if isinstance(col_key, str):
+                series = result[col_key]
+                return series._data[0] if scalar_row else series
+            if isinstance(col_key, slice):
+                cols = df._column_order
+                start = 0 if col_key.start is None else cols.index(col_key.start)
+                stop = len(cols) if col_key.stop is None else cols.index(col_key.stop) + 1
+                result = result[cols[start:stop]]
+            else:
+                result = result[list(col_key)]
+        if scalar_row:
+            return result.iloc[0]
+        return result
+
+
+class _DataFrameAtIndexer:
+    """Label-based scalar access (eager)."""
+
+    def __init__(self, df):
+        self._df = df
+
+    def __getitem__(self, key):
+        row_label, col = key
+        pos = np.flatnonzero(self._df._index == row_label)
+        if len(pos) == 0:
+            raise KeyError(row_label)
+        return self._df._get_column_data(col)[int(pos[0])]
+
+
+class _DataFrameIatIndexer:
+    """Integer-position scalar access (eager)."""
+
+    def __init__(self, df):
+        self._df = df
+
+    def __getitem__(self, key):
+        i, j = key
+        col = self._df._column_order[int(j)]
+        return self._df._get_column_data(col)[int(i)]
 
 
 # ============================
@@ -3967,6 +4959,22 @@ class Series:
         """No-op copy (index names are not tracked)."""
         return self.copy()
 
+    def add_prefix(self, prefix: str):
+        """Prefix index labels."""
+        return Series(
+            self._data,
+            index=np.asarray([f"{prefix}{i}" for i in self._index]),
+            name=self._name,
+        )
+
+    def add_suffix(self, suffix: str):
+        """Suffix index labels."""
+        return Series(
+            self._data,
+            index=np.asarray([f"{i}{suffix}" for i in self._index]),
+            name=self._name,
+        )
+
     def set_axis(self, labels, axis=0):
         """Replace the index (JIT-compatible)."""
         return Series(self._data, index=np.asarray(labels), name=self._name)
@@ -4511,6 +5519,24 @@ class _StringAccessor:
 # ========================================
 # Rolling
 # ========================================
+
+
+def _gather_rows_nanfill(arr, idx):
+    """Gather rows by index; idx == -1 means 'unmatched' and yields NaN
+    (numeric, promoting ints to float — pandas semantics) or None (object)."""
+    idx = np.asarray(idx)
+    has_missing = bool((idx < 0).any())
+    if isinstance(arr, np.ndarray) and arr.dtype == object:
+        out = arr[np.maximum(idx, 0)].copy()
+        if has_missing:
+            out[idx < 0] = None
+        return out
+    gathered = jnp.take(jnp.asarray(arr), jnp.asarray(np.maximum(idx, 0)), axis=0)
+    if not has_missing:
+        return gathered
+    if not jnp.issubdtype(gathered.dtype, jnp.floating):
+        gathered = gathered.astype(jnp.float32)
+    return jnp.where(jnp.asarray(idx < 0), jnp.nan, gathered)
 
 
 def _merge_indices(left_keys, right_keys, how):
